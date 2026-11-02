@@ -1,0 +1,17 @@
+# Local secrets and configuration (never commit)
+.env
+.env.*
+!.env.example
+*.key
+
+# Build and release output
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

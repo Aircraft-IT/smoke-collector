@@ -1,0 +1,1 @@
+sh -c 'echo "#smoke-host 1"; echo "#os-release"; grep -E "^(ID|VERSION_ID)=" /etc/os-release; echo "#kernel"; uname -r; echo "#packages apk"; apk list --installed 2>/dev/null; echo "#reboot-required"; echo no' > smoke-host.txt && echo "Saved $(pwd)/smoke-host.txt"

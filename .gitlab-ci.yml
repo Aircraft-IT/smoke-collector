@@ -1,0 +1,42 @@
+# smoke-collector CI: lint, unit tests, build. Releases are signed and published from a
+# maintainer's machine with scripts/release.sh; the minisign key never enters CI.
+stages: [lint, test, build]
+
+default:
+  image: golang:1.27
+  cache:
+    key: go-mod-$CI_COMMIT_REF_SLUG
+    paths: [.go/pkg/mod/]
+
+variables:
+  GOPATH: $CI_PROJECT_DIR/.go
+  GOFLAGS: -mod=readonly
+
+lint:
+  stage: lint
+  image: golangci/golangci-lint:v2.15.0
+  script:
+    - test -z "$(gofmt -s -l $(git ls-files '*.go'))" || { gofmt -s -l $(git ls-files '*.go'); exit 1; }
+    - go vet ./...
+    - golangci-lint run ./...
+    - sh -n install.sh && sh -n scripts/release.sh
+
+test:
+  stage: test
+  script:
+    - go mod verify
+    - go test -race -count=1 ./...
+
+build:
+  stage: build
+  variables:
+    CGO_ENABLED: "0"
+  script:
+    - |
+      for arch in amd64 arm64; do
+        GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w -X gitlab.aircraft.tw/smoke/smoke-collector/internal/version.Version=0.0.0-ci.$CI_COMMIT_SHORT_SHA" \
+          -o bin/smoke-collector_linux_$arch ./cmd/smoke-collector
+      done
+  artifacts:
+    paths: [bin/]
+    expire_in: 1 week

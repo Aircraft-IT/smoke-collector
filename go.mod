@@ -1,0 +1,5 @@
+module gitlab.aircraft.tw/smoke/smoke-collector
+
+go 1.27.3
+
+require golang.org/x/sys v0.49.0

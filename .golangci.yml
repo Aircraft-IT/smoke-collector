@@ -1,0 +1,38 @@
+version: "2"
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - gosec
+    - misspell
+    - nilerr
+    - noctx
+    - revive
+    - unconvert
+  settings:
+    gosec:
+      excludes:
+        - G104 # unhandled errors are checked by errcheck
+        - G115 # integer conversions are bounded by configured limits
+        - G304 # file paths come from configuration or fixed system paths
+        - G404 # math/rand is only used for retry jitter
+        - G703 # file paths come from configuration or fixed system paths
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters: [gosec, errcheck]
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - gitlab.aircraft.tw/smoke/smoke-collector
