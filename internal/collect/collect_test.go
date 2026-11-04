@@ -14,6 +14,8 @@ import (
 type fakeProgram struct {
 	out string
 	err error
+	// byVerb, when set, gives the output by first argument (systemctl list-units / show).
+	byVerb map[string]string
 }
 
 type fakeHost struct {
@@ -64,6 +66,9 @@ func (h *fakeHost) collector() *Collector {
 			if !ok {
 				h.t.Fatalf("unexpected program %s", path)
 			}
+			if p.byVerb != nil && len(args) > 0 {
+				return []byte(p.byVerb[args[0]]), p.err
+			}
 			return []byte(p.out), p.err
 		},
 		KernelRelease: func() (string, error) { return "6.8.0-45-generic", nil },
@@ -104,6 +109,7 @@ func TestUbuntu(t *testing.T) {
 		"#kernel\n6.8.0-45-generic\n" +
 		"#packages dpkg\n" + dpkgOut +
 		"#services\nnginx.service\nssh.service\nuser@1000.service\n" +
+		"#service-packages\n" +
 		"#reboot-required\nyes\n"
 	if got := string(res.Body); got != want {
 		t.Errorf("body:\n%s\nwant:\n%s", got, want)
@@ -130,7 +136,7 @@ func TestDebianContainer(t *testing.T) {
 	}
 	want := "#smoke-host 1\n#os-release\nVERSION_ID=\"12\"\nVERSION_CODENAME=bookworm\nID=debian\n" +
 		"#kernel\n6.8.0-45-generic\n#packages dpkg\nii \tbase-files\t12.4+deb12u7\tarm64\t\t\n" +
-		"#services\n#reboot-required\nno\n"
+		"#services\n#service-packages\n#reboot-required\nno\n"
 	if string(res.Body) != want {
 		t.Errorf("body:\n%q\nwant:\n%q", res.Body, want)
 	}
@@ -165,7 +171,7 @@ func TestSystemctlFailureKeepsPartialOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(res.Body), "#services\na.service\nnodelimiter\n\nb.service\n#reboot-required\nno\n") {
+	if !strings.Contains(string(res.Body), "#services\na.service\nnodelimiter\n\nb.service\n#service-packages\n#reboot-required\nno\n") {
 		t.Errorf("body:\n%s", res.Body)
 	}
 }

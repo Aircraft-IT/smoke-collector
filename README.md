@@ -16,18 +16,51 @@ The design is in the smoke-docs repository:
 ## What it collects
 
 Only what vulnerability matching needs, in the same `#smoke-host 1` text the manual command on
-the asset page produces. The output is byte-for-byte identical to that command on the same host:
+the asset page produces. The output is byte-for-byte identical to that command on the same host,
+except for `#service-packages` (see below):
 
 | Data | Source |
 | --- | --- |
-| `ID`, `VERSION_ID`, `VERSION_CODENAME` | `/etc/os-release` (the only file whose content is read) |
+| `ID`, `VERSION_ID`, `VERSION_CODENAME` | `/etc/os-release` |
 | Kernel release | `uname(2)`, same as `uname -r` |
 | Installed packages, with source package and version | `dpkg-query -W -f=…` or `apk list --installed` |
 | Running systemd service names (Debian, Ubuntu) | `systemctl list-units --type=service --state=running --no-legend --plain`, first column |
+| Which packages each running service uses (Debian, Ubuntu) | `/proc/<pid>/cgroup`, `/proc/<pid>/maps`, `/proc/<pid>/cmdline`, `systemctl show --property=Id,ExecStart <units>`, the ELF headers of the programs and their libraries, `/etc/ld.so.conf`, `/var/lib/dpkg/info/*.list` |
 | Whether a reboot is required (Debian, Ubuntu) | whether `/var/run/reboot-required` exists |
 
-Those three programs are the only ones it runs. It runs them directly (never through a shell),
-finds them only in `/usr/bin`, `/bin`, `/sbin` and `/usr/sbin`, and gives each a timeout.
+The only programs it runs are `dpkg-query` (or `apk`) and `systemctl` (`list-units` and `show`).
+It runs them directly (never through a shell), finds them only in `/usr/bin`, `/bin`, `/sbin`
+and `/usr/sbin`, and gives each a timeout. It never runs a program it analyses and does not use
+`ldd`.
+
+### `#service-packages`
+
+Which binary packages each running service uses, so Smoke can tell which services to restart
+after a library upgrade. It follows `#services`, one line per analysed unit:
+
+```text
+#service-packages
+nginx.service	linked	libc6 libssl3t64 nginx
+postgresql@16-main.service	maps	libc6 libssl3t64 postgresql-16
+```
+
+The fields are separated by tabs; packages are sorted and have no `:arch`. A unit is matched to
+its processes through `/proc/<pid>/cgroup`. The method says how the list was made:
+
+- `maps`: every process of the unit had a readable `/proc/<pid>/maps`. The packages own a mapped
+  file (a library replaced by an upgrade but still mapped counts) or a program file. This needs
+  root (`sudo smoke-collector run --dry-run`); the manual command uses only this method.
+- `linked`: the usual case for the unprivileged collector, which cannot read other users' maps
+  and is given no capability for it. The packages own the unit's programs (the ELF file in
+  `ExecStart` and absolute ELF paths in its processes' command lines) or a shared library they
+  link, recursively (DT_NEEDED resolved through DT_RPATH/DT_RUNPATH, `/etc/ld.so.conf` and the
+  standard directories). Libraries loaded at run time (plugins, NSS or PAM modules) are not seen.
+
+A unit that could not be analysed is left out (unknown), so is one with more than 300 packages;
+at most 200 lines are written, and the analysis stops after 60 seconds. Because the methods
+differ, this section is the one part of the output that can differ from the manual command (run
+without root, the command leaves out most units). Alpine has no `#services`, so it has no
+`#service-packages` either.
 
 To see exactly what would be sent:
 
@@ -137,7 +170,11 @@ Redirects are not followed, so the token cannot be forwarded anywhere else.
 
 - The token is used only in the `Authorization` header. It is never logged and never appears in
   error messages. Text returned by the server is scrubbed of it before it is printed.
-- The collector needs no root. The systemd unit runs it as `smoke-collector` with
+- The collector needs no root and no capability. To find service packages it reads `/proc`
+  (cgroup, cmdline, and maps where the kernel allows it), the ELF headers of service programs
+  and libraries (regular files of at most 256 MB, opened read-only and non-blocking) and the dpkg
+  file lists. It executes none of those files.
+- The systemd unit runs it as `smoke-collector` with
   `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`, an
   empty capability set, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6` (AF_UNIX lets
   `systemctl` reach D-Bus) and `SystemCallFilter=@system-service`. See
@@ -163,7 +200,9 @@ make test-install   # Docker: install.sh end to end against a fake Smoke (test/f
 - `testdata/plan-commands/` holds the shell commands from plan §2.1 and §2.2, copied exactly.
   `test-identity` runs them next to `--dry-run` as root and as an unprivileged user, with and
   without `/var/run/reboot-required`, and with a stand-in `systemctl`. It then parses every
-  output with smoke-backend's `host-text.ts` if that checkout sits next to this one.
+  output with smoke-backend's `host-text.ts` if that checkout sits next to this one. Containers
+  run no services, so there `#service-packages` is empty on both sides; the unit tests cover
+  the analysis with a fake `/proc`, dpkg lists and generated ELF files.
 - `install.sh` contains copies of the units in `systemd/`. A Go test keeps them identical.
 
 ## Release

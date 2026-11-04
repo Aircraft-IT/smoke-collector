@@ -81,7 +81,7 @@ func TestDryRunNeedsNoConfigAndNoNetwork(t *testing.T) {
 		t.Fatalf("code=%d uploads=%d stderr=%s", code, h.uploads, h.stderr.String())
 	}
 	want := "#smoke-host 1\n#os-release\nID=debian\nVERSION_ID=\"12\"\nVERSION_CODENAME=bookworm\n#kernel\n6.1.0-25-amd64\n" +
-		"#packages dpkg\nii \tbase-files\t12.4+deb12u7\tamd64\t\t\n#services\n#reboot-required\nno\n"
+		"#packages dpkg\nii \tbase-files\t12.4+deb12u7\tamd64\t\t\n#services\n#service-packages\n#reboot-required\nno\n"
 	if h.stdout.String() != want {
 		t.Errorf("stdout = %q", h.stdout.String())
 	}

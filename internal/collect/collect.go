@@ -2,10 +2,14 @@
 // §2.1, §2.2, §2.4, §5.1). The output is byte-for-byte what the shell commands
 // in the plan print on the same machine, so the backend parser needs no change.
 //
-// Only three external programs are run (dpkg-query or apk, and systemctl),
-// directly with exec (never through a shell), found in fixed directories, with
-// a timeout. Nothing else is read except /etc/os-release and whether
-// /var/run/reboot-required exists.
+// Only these external programs are run: dpkg-query or apk, and systemctl
+// (list-units, show), directly with exec (never through a shell), found in fixed
+// directories, with a timeout. Files read: /etc/os-release, whether
+// /var/run/reboot-required exists, and for #service-packages (servicepkgs.go)
+// /proc/<pid>/{cgroup,maps,cmdline}, the ELF headers of the services' programs
+// and libraries, /etc/ld.so.conf and the dpkg file lists. #service-packages is
+// the one section that can differ from the shell command: the command uses only
+// /proc/<pid>/maps, which needs root; the collector falls back to ELF analysis.
 package collect
 
 import (
@@ -62,6 +66,8 @@ type Collector struct {
 	KernelRelease func() (string, error)
 	// Timeout bounds each program run.
 	Timeout time.Duration
+	// ServicePackagesBudget bounds the #service-packages analysis (0: ServicePackagesBudget).
+	ServicePackagesBudget time.Duration
 }
 
 // New returns the production collector.
@@ -72,6 +78,8 @@ func New() *Collector {
 		Exec:          Run,
 		KernelRelease: kernelRelease,
 		Timeout:       DefaultTimeout,
+
+		ServicePackagesBudget: ServicePackagesBudget,
 	}
 }
 
@@ -148,10 +156,17 @@ func (c *Collector) Collect(ctx context.Context) (*Result, error) {
 		b.WriteString("#services\n")
 		// systemctl ... 2>/dev/null | cut -d" " -f1. Missing or failing systemctl (containers) is
 		// not an error: whatever it printed is used, like the shell pipeline.
-		if systemctl, ok := c.lookPath("systemctl"); ok {
+		systemctl, hasSystemctl := c.lookPath("systemctl")
+		var running []string
+		if hasSystemctl {
 			out, _ := c.run(ctx, systemctl, "list-units", "--type=service", "--state=running", "--no-legend", "--plain")
-			cutFirstField(&b, out)
+			running = cutFirstField(&b, out)
+		} else {
+			systemctl = ""
 		}
+
+		b.WriteString("#service-packages\n")
+		b.Write(c.servicePackages(ctx, mgr, systemctl, running))
 
 		b.WriteString("#reboot-required\n")
 		if c.isRegularFile("/var/run/reboot-required") {
@@ -254,15 +269,18 @@ func grepLines(b *bytes.Buffer, data []byte, re *regexp.Regexp) {
 }
 
 // cutFirstField writes the text before the first space of each line, or the whole line when
-// it has no space (cut -d" " -f1).
-func cutFirstField(b *bytes.Buffer, data []byte) {
+// it has no space (cut -d" " -f1), and returns the written lines.
+func cutFirstField(b *bytes.Buffer, data []byte) []string {
+	var fields []string
 	for _, line := range splitLines(data) {
 		if i := bytes.IndexByte(line, ' '); i >= 0 {
 			line = line[:i]
 		}
 		b.Write(line)
 		b.WriteByte('\n')
+		fields = append(fields, string(line))
 	}
+	return fields
 }
 
 // writeOutput copies program output verbatim. Output that does not end with a newline gets
