@@ -1,7 +1,7 @@
 # smoke-collector
 
 Host inventory collector for **Smoke**. Once a day it records which OS packages a Linux host
-has installed (Ubuntu, Debian, Alpine) and uploads that list to Smoke, which matches it against
+has installed (Ubuntu, Debian, Alpine, RHEL, Rocky Linux, AlmaLinux) and uploads that list to Smoke, which matches it against
 distribution security advisories. It is a single static Go binary that runs as an unprivileged
 user from a systemd timer (or cron) and exits when it is done. It does not stay running, update
 itself or listen on any port.
@@ -23,13 +23,17 @@ except for `#service-packages` (see below):
 | --- | --- |
 | `ID`, `VERSION_ID`, `VERSION_CODENAME` | `/etc/os-release` |
 | Kernel release | `uname(2)`, same as `uname -r` |
-| Installed packages, with source package and version | `dpkg-query -W -f=…` or `apk list --installed` |
-| Running systemd service names (Debian, Ubuntu) | `systemctl list-units --type=service --state=running --no-legend --plain`, first column |
-| Which packages each running service uses (Debian, Ubuntu) | `/proc/<pid>/cgroup`, `/proc/<pid>/maps`, `/proc/<pid>/cmdline`, `systemctl show --property=Id,ExecStart <units>`, the ELF headers of the programs and their libraries, `/etc/ld.so.conf`, `/var/lib/dpkg/info/*.list` |
-| Whether a reboot is required (Debian, Ubuntu) | whether `/var/run/reboot-required` exists |
+| Installed packages, with source package and version | `dpkg-query -W -f=…`, `apk list --installed` or `rpm -qa --qf '%{NAME}\t%{EPOCH}\t%{VERSION}-%{RELEASE}\t%{ARCH}\t%{SOURCERPM}\n'` |
+| Running systemd service names (Debian, Ubuntu, RHEL, Rocky Linux, AlmaLinux) | `systemctl list-units --type=service --state=running --no-legend --plain`, first column |
+| Which packages each running service uses (same) | `/proc/<pid>/cgroup`, `/proc/<pid>/maps`, `/proc/<pid>/cmdline`, `systemctl show --property=Id,ExecStart <units>`, the ELF headers of the programs and their libraries, `/etc/ld.so.conf`, then `/var/lib/dpkg/info/*.list` or `rpm -qf --qf '%{NAME}\n' <paths>` and `rpm -q --qf '[%{FILENAMES}\t%{=NAME}\n]' <owners>` |
+| Whether a reboot is required | Debian, Ubuntu: whether `/var/run/reboot-required` exists. RHEL, Rocky Linux, AlmaLinux: the exit status of `needs-restarting -r` (1 yes, 0 no; no value when it is not installed or fails otherwise) |
 
-The only programs it runs are `dpkg-query` (or `apk`) and `systemctl` (`list-units` and `show`).
-It runs them directly (never through a shell), finds them only in `/usr/bin`, `/bin`, `/sbin`
+rpm is used only when `/etc/os-release` has `ID=rhel`, `rocky` or `almalinux` (Red Hat UBI images
+have `ID=rhel`); `ID_LIKE` is not used, so CentOS, Oracle Linux, Amazon Linux and Fedora are not
+supported. A Debian or Ubuntu host with rpm installed still uses dpkg.
+
+The only programs it runs are `dpkg-query`, `apk` or `rpm`, `systemctl` (`list-units` and `show`)
+and, on rpm hosts, `needs-restarting -r`. It runs them directly (never through a shell), finds them only in `/usr/bin`, `/bin`, `/sbin`
 and `/usr/sbin`, and gives each a timeout. It never runs a program it analyses and does not use
 `ldd`.
 
@@ -173,7 +177,7 @@ Redirects are not followed, so the token cannot be forwarded anywhere else.
 - The collector needs no root and no capability. To find service packages it reads `/proc`
   (cgroup, cmdline, and maps where the kernel allows it), the ELF headers of service programs
   and libraries (regular files of at most 256 MB, opened read-only and non-blocking) and the dpkg
-  file lists. It executes none of those files.
+  file lists (on rpm hosts it asks `rpm` instead). It executes none of those files.
 - The systemd unit runs it as `smoke-collector` with
   `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`, an
   empty capability set, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6` (AF_UNIX lets
@@ -192,17 +196,18 @@ Go 1.27, standard library plus `golang.org/x/sys`.
 make test           # go test -race ./...
 make lint           # go vet + golangci-lint
 make build-linux    # bin/smoke-collector_linux_{amd64,arm64}
-make test-identity  # Docker: --dry-run vs the plan's shell commands on ubuntu:24.04, debian:12, alpine:3.21
+make test-identity  # Docker: --dry-run vs the plan's shell commands on ubuntu:24.04, debian:12, alpine:3.21, rockylinux:9, almalinux:9, ubi9
 make test-signing   # minisign -S -l + install.sh's openssl check, with a throwaway key (needs minisign, OpenSSL 3)
 make test-install   # Docker: install.sh end to end against a fake Smoke (test/fakesmoke), cron path
 ```
 
-- `testdata/plan-commands/` holds the shell commands from plan §2.1 and §2.2, copied exactly.
-  `test-identity` runs them next to `--dry-run` as root and as an unprivileged user, with and
-  without `/var/run/reboot-required`, and with a stand-in `systemctl`. It then parses every
+- `testdata/plan-commands/` holds the shell commands from plan §2.1 and §2.2, copied exactly
+  (`rpm.sh` is the rpm branch of the asset page's command). `test-identity` runs them next to
+  `--dry-run` as root and as an unprivileged user, with and without a pending reboot
+  (`/var/run/reboot-required`, or a stand-in `needs-restarting`), and with a stand-in `systemctl`. It then parses every
   output with smoke-backend's `host-text.ts` if that checkout sits next to this one. Containers
   run no services, so there `#service-packages` is empty on both sides; the unit tests cover
-  the analysis with a fake `/proc`, dpkg lists and generated ELF files.
+  the analysis with a fake `/proc`, dpkg lists, a fake rpm and generated ELF files.
 - `install.sh` contains copies of the units in `systemd/`. A Go test keeps them identical.
 
 ## Release

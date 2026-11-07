@@ -5,10 +5,12 @@ import (
 	"context"
 	"debug/elf"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -423,5 +425,121 @@ func TestReadELFRejects(t *testing.T) {
 	if o == nil || o.machine != elf.EM_AARCH64 || o.interp != "/lib/ld-linux-aarch64.so.1" ||
 		!reflect.DeepEqual(o.needed, []string{"libc.so.6", "libm.so.6"}) || !reflect.DeepEqual(o.runpath, []string{"/a", "$ORIGIN/x"}) {
 		t.Errorf("readELF(ok) = %+v", o)
+	}
+}
+
+// rhelHost is an x86_64 RHEL 9 root (/lib64 -> usr/lib64) with nginx (maps unreadable: linked)
+// and chronyd (maps readable). rpm answers -qa, -qf (owner names) and -q (file lists).
+func rhelHost(t *testing.T, qf, q string) *fakeHost {
+	h := newHost(t, "NAME=\"Red Hat Enterprise Linux\"\nVERSION=\"9.4 (Plow)\"\nID=\"rhel\"\nID_LIKE=\"fedora\"\nVERSION_ID=\"9.4\"\n")
+	h.programVerbs("usr/bin", "rpm", map[string]string{"-qa": rpmOut, "-qf": qf, "-q": q})
+	h.programVerbs("usr/bin", "systemctl", map[string]string{
+		"list-units": "nginx.service loaded active running nginx\nchronyd.service loaded active running NTP client/server\n",
+		"show": "Id=nginx.service\nExecStart={ path=/usr/sbin/nginx ; argv[]=/usr/sbin/nginx ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n\n" +
+			"Id=chronyd.service\n",
+	})
+	const lib = "usr/lib64/"
+	h.symlink("lib64", "usr/lib64")
+	h.symlink("bin", "usr/bin")
+	h.elf(lib+"ld-linux-x86-64.so.2", elf.EM_X86_64, "", "")
+	h.elf(lib+"libc.so.6", elf.EM_X86_64, "", "")
+	h.elf(lib+"libssl.so.3.0.7", elf.EM_X86_64, "", "", "libc.so.6")
+	h.symlink(lib+"libssl.so.3", "libssl.so.3.0.7")
+	h.elf("usr/sbin/nginx", elf.EM_X86_64, "/lib64/ld-linux-x86-64.so.2", "", "libssl.so.3", "libc.so.6")
+	h.proc(100, "0::/system.slice/nginx.service\n", "nginx: master process /usr/sbin/nginx", "", true)
+	h.proc(200, "0::/system.slice/chronyd.service\n", "/usr/sbin/chronyd\x00-F\x002\x00",
+		mapsLine("/usr/sbin/chronyd")+mapsLine("/usr/lib64/libc.so.6"), false)
+	return h
+}
+
+// rpmErr makes the collector's rpm runs with the first argument verb return err, with the
+// output cut to keep bytes.
+func rpmErr(c *Collector, verb string, keep func(out []byte) []byte, err error) {
+	run := c.Exec
+	c.Exec = func(ctx context.Context, path string, args ...string) ([]byte, error) {
+		out, e := run(ctx, path, args...)
+		if strings.HasSuffix(path, "/rpm") && args[0] == verb {
+			return keep(out), err
+		}
+		return out, e
+	}
+}
+
+// What rpm prints for those paths: unowned paths get a sentence (and a non-zero exit), a
+// path owned twice gets two names.
+const rhelQF = "glibc\nfile /lib64/libssl.so.3 is not owned by any package\nnginx\nchrony\nopenssl-libs\nglibc\n"
+
+const rhelQ = "/usr/lib64/libc.so.6\tglibc\n/usr/lib64/ld-linux-x86-64.so.2\tglibc\n/usr/share/doc/glibc\tglibc\n" +
+	"/usr/sbin/nginx\tnginx\n/usr/sbin/chronyd\tchrony\n" +
+	"/usr/lib64/libssl.so.3\topenssl-libs\n/usr/lib64/libssl.so.3.0.7\topenssl-libs\n/usr/lib64/libssl.so.3.0.7\tcompat-openssl\n" +
+	"(contains no files)\n/usr/sbin/nginx\tbad name\n"
+
+func TestServicePackagesRpm(t *testing.T) {
+	h := rhelHost(t, rhelQF, rhelQ)
+	c := h.collector()
+	rpmErr(c, "-qf", func(out []byte) []byte { return out }, exitErr(1))
+	res, err := c.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "chronyd.service\tmaps\tchrony glibc\n" +
+		"nginx.service\tlinked\tcompat-openssl glibc nginx openssl-libs\n"
+	if got := section(res.Body); got != want {
+		t.Errorf("#service-packages:\n%s\nwant:\n%s", got, want)
+	}
+	var qf, q []string
+	for _, c := range h.calls {
+		switch {
+		case len(c) > 1 && c[1] == "-qf":
+			qf = c
+		case len(c) > 1 && c[1] == "-q":
+			q = c
+		}
+	}
+	if len(qf) < 4 || !reflect.DeepEqual(qf[:4], []string{"/usr/bin/rpm", "-qf", "--qf", `%{NAME}\n`}) ||
+		!slices.IsSorted(qf[4:]) || !slices.Contains(qf[4:], "/lib64/libc.so.6") || !slices.Contains(qf[4:], "/usr/lib64/libc.so.6") {
+		t.Errorf("rpm -qf call = %q", qf)
+	}
+	// Each owner once, in name order; the unowned sentence is not a name.
+	if !reflect.DeepEqual(q, []string{"/usr/bin/rpm", "-q", "--qf", `[%{FILENAMES}\t%{=NAME}\n]`, "chrony", "glibc", "nginx", "openssl-libs"}) {
+		t.Errorf("rpm -q call = %q", q)
+	}
+	if !strings.HasSuffix(string(res.Body), "#service-packages\n"+want+"#reboot-required\n") {
+		t.Errorf("body:\n%s", res.Body)
+	}
+}
+
+func TestServicePackagesRpmFailure(t *testing.T) {
+	// rpm did not exit (timeout, output too large): unknown, the run goes on.
+	for _, verb := range []string{"-qf", "-q"} {
+		h := rhelHost(t, rhelQF, rhelQ)
+		c := h.collector()
+		rpmErr(c, verb, func(out []byte) []byte { return out[:len(out)/2] }, errors.New("output is larger than 33554432 bytes"))
+		res, err := c.Collect(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := section(res.Body); got != "" {
+			t.Errorf("%s fails: #service-packages:\n%s", verb, got)
+		}
+	}
+}
+
+func TestRpmOwnersBatches(t *testing.T) {
+	h := rhelHost(t, "glibc\n", "/p/0\tglibc\n/p/1199\tglibc\n")
+	need := map[string]bool{}
+	for i := range 1200 {
+		need[fmt.Sprintf("/p/%d", i)] = true
+	}
+	got := h.collector().rpmOwners(context.Background(), need)
+	if want := map[string][]string{"/p/0": {"glibc"}, "/p/1199": {"glibc"}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("rpmOwners = %q", got)
+	}
+	var sizes []int
+	for _, c := range h.calls {
+		sizes = append(sizes, len(c)-4)
+	}
+	if !reflect.DeepEqual(sizes, []int{500, 500, 200, 1}) {
+		t.Errorf("operands per run = %v", sizes)
 	}
 }

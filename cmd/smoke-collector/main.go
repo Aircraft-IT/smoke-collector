@@ -1,5 +1,5 @@
 // Command smoke-collector collects the OS package inventory of a Linux host
-// (Ubuntu, Debian, Alpine) and uploads it to Smoke (OS detection plan §5.1).
+// (Ubuntu, Debian, Alpine, RHEL, Rocky Linux, AlmaLinux) and uploads it to Smoke (OS detection plan §5.1).
 //
 //	smoke-collector run [--dry-run] [--config PATH] [--insecure-http]
 //	smoke-collector print-config [--config PATH] [--insecure-http]

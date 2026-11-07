@@ -1,8 +1,8 @@
 #!/bin/sh
 # Runs inside a test container (see test-identity.sh): runs the plan's shell command
-# (testdata/plan-commands/<kind>.sh, verbatim from OS-DETECTION-PLAN §2.1/§2.2) and
-# `smoke-collector run --dry-run`, and compares the two outputs byte for byte.
-#   identity-inner.sh <deb|apk> <label> <outdir>
+# (testdata/plan-commands/<kind>.sh, verbatim from OS-DETECTION-PLAN §2.1/§2.2 and the page's
+# rpm command) and `smoke-collector run --dry-run`, and compares the two outputs byte for byte.
+#   identity-inner.sh <deb|apk|rpm> <label> <outdir>
 set -eu
 kind=$1 label=$2 out=$3
 work=$(mktemp -d)

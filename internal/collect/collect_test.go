@@ -3,6 +3,7 @@ package collect
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -290,5 +291,185 @@ func TestKernelRelease(t *testing.T) {
 	r, err := kernelRelease()
 	if err != nil || r == "" || strings.ContainsRune(r, 0) {
 		t.Errorf("kernelRelease() = %q, %v", r, err)
+	}
+}
+
+// exitErr is a program that ran and exited with a status, like *exec.ExitError.
+type exitErr int
+
+func (e exitErr) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+func (e exitErr) ExitCode() int { return int(e) }
+
+const rockyOSRelease = `NAME="Rocky Linux"
+VERSION="9.4 (Blue Onyx)"
+ID="rocky"
+ID_LIKE="rhel centos fedora"
+VERSION_ID="9.4"
+PLATFORM_ID="platform:el9"
+PRETTY_NAME="Rocky Linux 9.4 (Blue Onyx)"
+ROCKY_SUPPORT_PRODUCT="Rocky-Linux-9"
+`
+
+const rpmOut = "openssl-libs\t1\t3.0.7-27.el9_4\tx86_64\topenssl-3.0.7-27.el9_4.src.rpm\n" +
+	"bash\t(none)\t5.1.8-9.el9\tx86_64\tbash-5.1.8-9.el9.src.rpm\n" +
+	"gpg-pubkey\t(none)\t5a6340b3-6229229e\t(none)\t(none)\n"
+
+func TestRocky(t *testing.T) {
+	h := newHost(t, rockyOSRelease)
+	h.programVerbs("usr/bin", "rpm", map[string]string{"-qa": rpmOut})
+	h.program("usr/bin", "systemctl", systemctlOut, nil)
+	h.program("usr/bin", "needs-restarting", "Core libraries or services have been updated since boot-up:\n", exitErr(1))
+	h.file("var/run/reboot-required", "") // Debian only: ignored on rpm hosts
+	res, err := h.collector().Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "#smoke-host 1\n" +
+		"#os-release\n" +
+		"ID=\"rocky\"\nVERSION_ID=\"9.4\"\n" +
+		"#kernel\n6.8.0-45-generic\n" +
+		"#packages rpm\n" + rpmOut +
+		"#services\nnginx.service\nssh.service\nuser@1000.service\n" +
+		"#service-packages\n" +
+		"#reboot-required\nyes\n"
+	if got := string(res.Body); got != want {
+		t.Errorf("body:\n%s\nwant:\n%s", got, want)
+	}
+	if res.Manager != Rpm || res.OSID != "rocky" {
+		t.Errorf("manager=%s id=%s", res.Manager, res.OSID)
+	}
+	wantCalls := [][]string{
+		{"/usr/bin/rpm", "-qa", "--qf", `%{NAME}\t%{EPOCH}\t%{VERSION}-%{RELEASE}\t%{ARCH}\t%{SOURCERPM}\n`},
+		{"/usr/bin/systemctl", "list-units", "--type=service", "--state=running", "--no-legend", "--plain"},
+		{"/usr/bin/needs-restarting", "-r"},
+	}
+	if !reflect.DeepEqual(h.calls, wantCalls) {
+		t.Errorf("calls = %q", h.calls)
+	}
+}
+
+func TestRpmRebootRequired(t *testing.T) {
+	const needed = "Core libraries or services have been updated since boot-up:\n  * kernel\n\nReboot is required to fully utilize these updates.\n"
+	for _, tc := range []struct {
+		name    string
+		install bool
+		out     string
+		err     error
+		want    string
+	}{
+		{"missing", false, "", nil, "#reboot-required\n"},
+		{"not needed", true, "No core libraries or services have been updated since boot-up.\nReboot should not be necessary.\n", nil, "#reboot-required\nno\n"},
+		{"needed", true, needed, exitErr(1), "#reboot-required\nyes\n"},
+		{"wrapped status", true, needed, fmt.Errorf("%w: wrapped", exitErr(1)), "#reboot-required\nyes\n"},
+		// dnf exits 1 on errors too: without its report that is not a reboot.
+		{"error exit 1", true, "Error: rpmdb open failed\n", exitErr(1), "#reboot-required\n"},
+		{"other status", true, "", exitErr(2), "#reboot-required\n"},
+		{"killed", true, "", exitErr(-1), "#reboot-required\n"},
+		{"timeout", true, "", errors.New("needs-restarting did not finish in time"), "#reboot-required\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHost(t, "ID=almalinux\nVERSION_ID=\"9.4\"\n")
+			h.programVerbs("usr/bin", "rpm", map[string]string{"-qa": rpmOut})
+			if tc.install {
+				h.program("usr/bin", "needs-restarting", tc.out, tc.err)
+			}
+			res, err := h.collector().Collect(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasSuffix(string(res.Body), "#service-packages\n"+tc.want) {
+				t.Errorf("body:\n%s", res.Body)
+			}
+		})
+	}
+}
+
+func TestRpmFailure(t *testing.T) {
+	h := newHost(t, "ID=rhel\nVERSION_ID=\"9.4\"\n")
+	h.program("usr/bin", "rpm", "partial", exitErr(1))
+	_, err := h.collector().Collect(context.Background())
+	var ce *Error
+	if !errors.As(err, &ce) || !strings.Contains(err.Error(), "rpm -qa failed") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestRpmOnlyOnRhelFamily(t *testing.T) {
+	collect := func(osRelease string, progs ...string) (*Result, error) {
+		h := newHost(t, osRelease)
+		for _, p := range progs {
+			switch p {
+			case "dpkg-query":
+				h.program("usr/bin", p, dpkgOut, nil)
+			case "apk":
+				h.program("sbin", p, "", nil)
+			case "rpm":
+				h.programVerbs("usr/bin", p, map[string]string{"-qa": rpmOut})
+			}
+		}
+		return h.collector().Collect(context.Background())
+	}
+	for _, tc := range []struct {
+		name, osRelease string
+		progs           []string
+		want            Manager
+		wantErr         string
+	}{
+		{"ubuntu with rpm installed", ubuntuOSRelease, []string{"dpkg-query", "rpm"}, Dpkg, ""},
+		{"alpine with rpm installed", "ID=alpine\n", []string{"apk", "rpm"}, Apk, ""},
+		{"rhel (UBI)", "ID=\"rhel\"\nVERSION_ID=\"9.4\"\n", []string{"rpm"}, Rpm, ""},
+		{"rocky with dpkg from EPEL", rockyOSRelease, []string{"dpkg-query", "rpm"}, Rpm, ""},
+		{"almalinux", "ID=almalinux\nVERSION_ID=\"10.0\"\n", []string{"rpm"}, Rpm, ""},
+		{"centos", "ID=\"centos\"\nID_LIKE=\"rhel fedora\"\nVERSION_ID=\"9\"\n", []string{"rpm"}, "",
+			`os-release ID "centos" is not supported with rpm (supported: Ubuntu, Debian, Alpine, RHEL, Rocky Linux, AlmaLinux)`},
+		{"fedora", "ID=fedora\nVERSION_ID=41\n", []string{"rpm"}, "", `"fedora" is not supported`},
+		{"rhel without rpm (UBI micro)", "ID=\"rhel\"\n", nil, "", "rpm not found in /usr/bin, /bin, /sbin, /usr/sbin"},
+		{"nothing", "ID=arch\n", nil, "", "none of dpkg-query, apk or rpm found in /usr/bin, /bin, /sbin, /usr/sbin (supported: Ubuntu, Debian, Alpine, RHEL, Rocky Linux, AlmaLinux)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := collect(tc.osRelease, tc.progs...)
+			if tc.wantErr != "" {
+				var ce *Error
+				if !errors.As(err, &ce) || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || res.Manager != tc.want {
+				t.Fatalf("res=%+v err=%v", res, err)
+			}
+		})
+	}
+}
+
+// The collector runs the same programs with the same formats as the page's shell commands
+// (testdata/plan-commands, compared byte for byte by scripts/test-identity.sh).
+func TestPlanCommandFormats(t *testing.T) {
+	read := func(name string) string {
+		b, err := os.ReadFile(filepath.Join("..", "..", "testdata", "plan-commands", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	deb, rpm := read("deb.sh"), read("rpm.sh")
+	// The shell gets \${…} inside double quotes; dpkg-query and rpm expand \t and \n themselves.
+	if want := `dpkg-query -W -f="` + strings.ReplaceAll(DpkgFormat, "$", `\$`) + `"; `; !strings.Contains(deb, want) {
+		t.Errorf("deb.sh lacks %s", want)
+	}
+	for _, want := range []string{
+		`echo "#os-release"; grep -E "^(ID|VERSION_ID|VERSION_CODENAME)=" /etc/os-release; `,
+		`echo "#packages rpm"; rpm -qa --qf "` + RpmFormat + `"; echo "#services"; `,
+		`xargs -0r rpm -qf --qf "%{NAME}\n" 2>/dev/null | grep -v " " | LC_ALL=C sort -u | tr "\n" "\0" | xargs -0r rpm -q --qf "[%{FILENAMES}\t%{=NAME}\n]" 2>/dev/null >"$t/s"; `,
+		`echo "#reboot-required"; if command -v needs-restarting >/dev/null 2>&1; then o=$(LC_ALL=C needs-restarting -r 2>/dev/null); rc=$?; if [ "$rc" = 1 ] && printf %s "$o" | grep -Eq "Reboot is required|updated since boot-up"; then echo yes; elif [ "$rc" = 0 ]; then echo no; fi; fi' > smoke-host.txt`,
+	} {
+		if !strings.Contains(rpm, want) {
+			t.Errorf("rpm.sh lacks %s", want)
+		}
+	}
+	// Everything else is the dpkg command: the same #services and #service-packages analysis.
+	debServices := deb[strings.Index(deb, `echo "#services"`):strings.Index(deb, `cut -f2 "$t/o"`)]
+	if !strings.Contains(rpm, debServices) {
+		t.Error("rpm.sh and deb.sh differ in #services or the /proc scan")
 	}
 }

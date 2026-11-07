@@ -1,5 +1,5 @@
 #!/bin/sh
-# smoke-collector installer (OS detection plan §5.4). POSIX sh; Ubuntu, Debian and Alpine.
+# smoke-collector installer (OS detection plan §5.4). POSIX sh; Ubuntu, Debian, Alpine, RHEL, Rocky Linux and AlmaLinux.
 #
 #   curl -fsSL https://<smoke>/downloads/collector/install.sh | sudo sh -s -- --url https://<smoke>
 #
@@ -119,7 +119,7 @@ hex() { dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | od -An -v -tx1 | tr -
 
 check_openssl() {
 	command -v openssl >/dev/null 2>&1 ||
-		die "openssl is needed to verify the signature (Alpine: apk add openssl; Debian/Ubuntu: apt-get install openssl), or pass --skip-signature"
+		die "openssl is needed to verify the signature (Alpine: apk add openssl; Debian/Ubuntu: apt-get install openssl; RHEL/Rocky/AlmaLinux: dnf install openssl), or pass --skip-signature"
 	major=$(openssl version 2>/dev/null | awk '{ split($2, v, "."); print v[1] }')
 	case $major in
 	'' | *[!0-9]*) die "cannot tell the openssl version; OpenSSL 3 is needed, or pass --skip-signature" ;;

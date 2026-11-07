@@ -1,8 +1,10 @@
 #!/bin/sh
-# Byte-identity check (OS detection plan §5.1): on ubuntu:24.04, debian:12 and alpine:3.21,
-# `smoke-collector run --dry-run` must print exactly what the plan's shell command writes to
-# smoke-host.txt. Runs as root and as an unprivileged user; on Debian/Ubuntu also with
-# /var/run/reboot-required present and with a stand-in systemctl (containers have none).
+# Byte-identity check (OS detection plan §5.1): on ubuntu:24.04, debian:12, alpine:3.21,
+# rockylinux:9, almalinux:9 and Red Hat UBI 9, `smoke-collector run --dry-run` must print exactly
+# what the plan's shell command writes to smoke-host.txt. Runs as root and as an unprivileged
+# user; on Debian/Ubuntu and the rpm distributions also with a reboot pending
+# (/var/run/reboot-required, or a stand-in needs-restarting that exits 1) and with a stand-in
+# systemctl (containers have none).
 # When the smoke-backend checkout sits next to this repo, every output is also parsed with the
 # backend's host-text.ts parser (node:26-alpine).
 #   scripts/test-identity.sh            # needs Docker
@@ -32,14 +34,20 @@ run() { # name user image command...
 	docker rm -f "$name" >/dev/null 2>&1 || true
 }
 
-for spec in ubuntu:24.04:deb debian:12:deb alpine:3.21:apk; do
+for spec in ubuntu:24.04:deb debian:12:deb alpine:3.21:apk rockylinux:9:rpm almalinux:9:rpm \
+	registry.access.redhat.com/ubi9/ubi:latest:rpm; do
 	image=${spec%:*} kind=${spec##*:}
-	tag=$(echo "$image" | tr ':.' '--')
+	tag=$(echo "${image##*/}" | tr ':.' '--')
 	run "sc-identity-$tag-root" 0:0 "$image" "sh /t/scripts/identity-inner.sh $kind $tag-root /out"
 	run "sc-identity-$tag-nobody" 65534:65534 "$image" "sh /t/scripts/identity-inner.sh $kind $tag-nonroot /out"
 	if [ "$kind" = deb ]; then
 		run "sc-identity-$tag-reboot" 0:0 "$image" \
 			"touch /var/run/reboot-required && sh /t/scripts/identity-inner.sh $kind $tag-reboot-required /out"
+	elif [ "$kind" = rpm ]; then
+		run "sc-identity-$tag-reboot" 0:0 "$image" \
+			"printf '#!/bin/sh\nexit 1\n' >/usr/bin/needs-restarting && chmod 755 /usr/bin/needs-restarting && sh /t/scripts/identity-inner.sh $kind $tag-reboot-required /out"
+	fi
+	if [ "$kind" != apk ]; then
 		run "sc-identity-$tag-systemctl" 0:0 "$image" \
 			"printf '#!/bin/sh\n%s\n' '$fake_systemctl' >/usr/bin/systemctl && chmod 755 /usr/bin/systemctl && sh /t/scripts/identity-inner.sh $kind $tag-services /out"
 	fi

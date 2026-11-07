@@ -2,12 +2,13 @@
 // §2.1, §2.2, §2.4, §5.1). The output is byte-for-byte what the shell commands
 // in the plan print on the same machine, so the backend parser needs no change.
 //
-// Only these external programs are run: dpkg-query or apk, and systemctl
-// (list-units, show), directly with exec (never through a shell), found in fixed
-// directories, with a timeout. Files read: /etc/os-release, whether
-// /var/run/reboot-required exists, and for #service-packages (servicepkgs.go)
-// /proc/<pid>/{cgroup,maps,cmdline}, the ELF headers of the services' programs
-// and libraries, /etc/ld.so.conf and the dpkg file lists. #service-packages is
+// Only these external programs are run: dpkg-query, apk or rpm, systemctl
+// (list-units, show) and, on RHEL, Rocky Linux and AlmaLinux, needs-restarting -r,
+// directly with exec (never through a shell), found in fixed directories, with a
+// timeout. Files read: /etc/os-release, whether /var/run/reboot-required exists, and
+// for #service-packages (servicepkgs.go) /proc/<pid>/{cgroup,maps,cmdline}, the ELF
+// headers of the services' programs and libraries, /etc/ld.so.conf and the dpkg file
+// lists (rpm hosts ask rpm -qf and rpm -q instead). #service-packages is
 // the one section that can differ from the shell command: the command uses only
 // /proc/<pid>/maps, which needs root; the collector falls back to ELF analysis.
 package collect
@@ -31,6 +32,17 @@ const Magic = "#smoke-host 1"
 
 // DpkgFormat is the dpkg-query format of plan §2.1 (dpkg-query expands \t and \n itself).
 const DpkgFormat = `${db:Status-Abbrev}\t${Package}\t${Version}\t${Architecture}\t${source:Package}\t${source:Version}\n`
+
+// RpmFormat is the rpm -qa query format of the #packages rpm section (rpm expands \t and \n
+// itself). The epoch is printed as rpm prints it: "(none)" or digits.
+const RpmFormat = `%{NAME}\t%{EPOCH}\t%{VERSION}-%{RELEASE}\t%{ARCH}\t%{SOURCERPM}\n`
+
+// RpmIDs are the os-release IDs collected with rpm. ID_LIKE is not used: CentOS, Oracle Linux,
+// Amazon Linux and Fedora are not supported.
+var RpmIDs = map[string]bool{"rhel": true, "rocky": true, "almalinux": true}
+
+// supported lists the distributions for error messages.
+const supported = "supported: Ubuntu, Debian, Alpine, RHEL, Rocky Linux, AlmaLinux"
 
 // SearchDirs are the only directories searched for programs (no $PATH).
 var SearchDirs = []string{"/usr/bin", "/bin", "/sbin", "/usr/sbin"}
@@ -89,6 +101,7 @@ type Manager string
 const (
 	Dpkg Manager = "dpkg"
 	Apk  Manager = "apk"
+	Rpm  Manager = "rpm"
 )
 
 // Result is the collected inventory.
@@ -115,17 +128,27 @@ func (c *Collector) Collect(ctx context.Context) (*Result, error) {
 
 	dpkgQuery, hasDpkg := c.lookPath("dpkg-query")
 	apk, hasApk := c.lookPath("apk")
+	rpm, hasRpm := c.lookPath("rpm")
+	// rpm only where os-release says RHEL, Rocky Linux or AlmaLinux: a Debian or Ubuntu host
+	// with rpm installed still uses dpkg.
 	var mgr Manager
 	switch {
-	case id == "alpine" && hasApk, !hasDpkg && hasApk:
+	case id == "alpine" && hasApk:
+		mgr = Apk
+	case RpmIDs[id] && hasRpm:
+		mgr = Rpm
+	case !hasDpkg && hasApk:
 		mgr = Apk
 	case id != "alpine" && hasDpkg:
 		mgr = Dpkg
 	case id == "alpine":
 		return nil, errorf("apk not found in %s", strings.Join(c.Dirs, ", "))
+	case RpmIDs[id]:
+		return nil, errorf("rpm not found in %s", strings.Join(c.Dirs, ", "))
+	case hasRpm:
+		return nil, errorf("os-release ID %q is not supported with rpm (%s)", id, supported)
 	default:
-		return nil, errorf("neither dpkg-query nor apk found in %s (supported: Ubuntu, Debian, Alpine)",
-			strings.Join(c.Dirs, ", "))
+		return nil, errorf("none of dpkg-query, apk or rpm found in %s (%s)", strings.Join(c.Dirs, ", "), supported)
 	}
 
 	kernel, err := c.KernelRelease()
@@ -137,21 +160,30 @@ func (c *Collector) Collect(ctx context.Context) (*Result, error) {
 	b.WriteString(Magic + "\n")
 	b.WriteString("#os-release\n")
 	// grep -E "^(ID|VERSION_ID[|VERSION_CODENAME])=" /etc/os-release
-	if mgr == Dpkg {
-		grepLines(&b, osRelease, debOSRelease)
-	} else {
+	if mgr == Apk {
 		grepLines(&b, osRelease, apkOSRelease)
+	} else {
+		grepLines(&b, osRelease, debOSRelease)
 	}
 	b.WriteString("#kernel\n")
 	b.WriteString(kernel + "\n")
 
-	if mgr == Dpkg {
-		b.WriteString("#packages dpkg\n")
-		out, err := c.run(ctx, dpkgQuery, "-W", "-f="+DpkgFormat)
-		if err != nil {
-			return nil, errorf("dpkg-query failed: %v", err)
+	if mgr == Dpkg || mgr == Rpm {
+		if mgr == Dpkg {
+			b.WriteString("#packages dpkg\n")
+			out, err := c.run(ctx, dpkgQuery, "-W", "-f="+DpkgFormat)
+			if err != nil {
+				return nil, errorf("dpkg-query failed: %v", err)
+			}
+			writeOutput(&b, out)
+		} else {
+			b.WriteString("#packages rpm\n")
+			out, err := c.run(ctx, rpm, "-qa", "--qf", RpmFormat)
+			if err != nil {
+				return nil, errorf("rpm -qa failed: %v", err)
+			}
+			writeOutput(&b, out)
 		}
-		writeOutput(&b, out)
 
 		b.WriteString("#services\n")
 		// systemctl ... 2>/dev/null | cut -d" " -f1. Missing or failing systemctl (containers) is
@@ -169,9 +201,12 @@ func (c *Collector) Collect(ctx context.Context) (*Result, error) {
 		b.Write(c.servicePackages(ctx, mgr, systemctl, running))
 
 		b.WriteString("#reboot-required\n")
-		if c.isRegularFile("/var/run/reboot-required") {
+		switch {
+		case mgr == Rpm:
+			b.WriteString(c.needsRestarting(ctx))
+		case c.isRegularFile("/var/run/reboot-required"):
 			b.WriteString("yes\n")
-		} else {
+		default:
 			b.WriteString("no\n")
 		}
 	} else {
@@ -185,6 +220,45 @@ func (c *Collector) Collect(ctx context.Context) (*Result, error) {
 		b.WriteString("#reboot-required\nno\n")
 	}
 	return &Result{Body: b.Bytes(), Manager: mgr, OSID: id}, nil
+}
+
+// needsRestarting is the #reboot-required value of an rpm host: `needs-restarting -r` exits 0
+// when no reboot is needed and 1 when one is, but dnf also exits 1 on errors (an unreadable
+// rpmdb under a hardened unit). So "yes" needs exit 1 and its report ("Reboot is required",
+// "updated since boot-up"); anything else is unknown and nothing is written.
+func (c *Collector) needsRestarting(ctx context.Context) string {
+	p, ok := c.lookPath("needs-restarting")
+	if !ok {
+		return ""
+	}
+	out, err := c.run(ctx, p, "-r")
+	switch exitCode(err) {
+	case 0:
+		return "no\n"
+	case 1:
+		if rebootReport(out) {
+			return "yes\n"
+		}
+	}
+	return ""
+}
+
+// rebootReport reports whether needs-restarting's output says a reboot is needed (dnf 4 and 5).
+func rebootReport(out []byte) bool {
+	return bytes.Contains(out, []byte("Reboot is required")) || bytes.Contains(out, []byte("updated since boot-up"))
+}
+
+// exitCode is 0 for a nil error, the exit status when the program ran and exited, and -1
+// otherwise (not started, killed, timed out, output too large).
+func exitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exit interface{ ExitCode() int } // *exec.ExitError
+	if errors.As(err, &exit) {
+		return exit.ExitCode()
+	}
+	return -1
 }
 
 func (c *Collector) path(p string) string { return filepath.Join(c.Root, p) }

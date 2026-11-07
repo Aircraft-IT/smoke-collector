@@ -41,6 +41,8 @@ const (
 	maxProcFile     = 16 << 20
 	maxCmdline      = 1 << 20
 	maxLdConfDepth  = 8
+	// Paths or package names per rpm run, well below the argument size limit.
+	rpmArgsPerRun = 500
 )
 
 var (
@@ -52,6 +54,8 @@ var (
 	// Unit names passed to systemctl show (never one that looks like an option).
 	showableUnit = regexp.MustCompile(`^[A-Za-z0-9:_.@\\][A-Za-z0-9:_.@\\-]*\.service$`)
 	execPath     = regexp.MustCompile(`\{ path=(.*?) ; argv\[\]=`)
+	// RPM package names (upper case and _ allowed: NetworkManager, python3-PyYAML).
+	rpmName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9+._-]{0,99}$`)
 )
 
 type svcUnit struct {
@@ -152,9 +156,12 @@ func (c *Collector) servicePackages(ctx context.Context, mgr Manager, systemctl 
 	}
 
 	var owners map[string][]string
-	if mgr == Apk {
+	switch mgr {
+	case Apk:
 		owners = c.apkOwners(ctx, need)
-	} else {
+	case Rpm:
+		owners = c.rpmOwners(ctx, need)
+	default:
 		owners = c.dpkgOwners(ctx, need)
 	}
 	if owners == nil {
@@ -403,6 +410,56 @@ func (c *Collector) dpkgOwners(ctx context.Context, need map[string]bool) map[st
 			}
 		}
 		f.Close()
+	}
+	return owners
+}
+
+// rpmOwners does the same with rpm, whose database cannot be read directly: `rpm -qf` names the
+// packages that own the needed paths, then `rpm -q` lists those packages' files and a path
+// counts only where a file list has it literally, as with the dpkg lists. Like the shell
+// command: rpm -qf --qf '%{NAME}\n' <paths> | sort -u | rpm -q --qf '[%{FILENAMES}\t%{=NAME}\n]'.
+// Lines that are not a package name ("file ... is not owned by any package") are skipped; rpm
+// exits non-zero for those, which is not a failure. nil when rpm fails otherwise or runs out of
+// time.
+func (c *Collector) rpmOwners(ctx context.Context, need map[string]bool) map[string][]string {
+	rpm, ok := c.lookPath("rpm")
+	if !ok {
+		return nil
+	}
+	// query runs rpm with the fixed options and the operands in batches, passing each output line
+	// to each; false when a run failed (other than by a non-zero exit) or time ran out.
+	query := func(options, operands []string, each func(line string)) bool {
+		for len(operands) > 0 {
+			n := min(len(operands), rpmArgsPerRun)
+			args := append(slices.Clone(options), operands[:n]...)
+			operands = operands[n:]
+			out, err := c.run(ctx, rpm, args...)
+			if (err != nil && exitCode(err) <= 0) || ctx.Err() != nil {
+				return false
+			}
+			for _, line := range splitLines(out) {
+				each(string(line))
+			}
+		}
+		return true
+	}
+
+	names := map[string]bool{}
+	if !query([]string{"-qf", "--qf", `%{NAME}\n`}, sortedKeys(need), func(line string) {
+		if rpmName.MatchString(line) {
+			names[line] = true
+		}
+	}) {
+		return nil
+	}
+	owners := map[string][]string{}
+	if !query([]string{"-q", "--qf", `[%{FILENAMES}\t%{=NAME}\n]`}, sortedKeys(names), func(line string) {
+		p, pkg, ok := strings.Cut(line, "\t")
+		if ok && need[p] && rpmName.MatchString(pkg) && !slices.Contains(owners[p], pkg) {
+			owners[p] = append(owners[p], pkg)
+		}
+	}) {
+		return nil
 	}
 	return owners
 }
