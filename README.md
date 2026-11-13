@@ -2,16 +2,19 @@
 
 Host inventory collector for **Smoke**. Once a day it records which OS packages a Linux host
 has installed (Ubuntu, Debian, Alpine, RHEL, Rocky Linux, AlmaLinux) and uploads that list to Smoke, which matches it against
-distribution security advisories. It is a single static Go binary that runs as an unprivileged
-user from a systemd timer (or cron) and exits when it is done. It does not stay running, update
-itself or listen on any port.
+distribution security advisories. It can also send the application lockfiles at paths that root
+configures on the host (see [Lockfiles](#lockfiles)), and a separate program reports the running
+Docker containers (see [Container collector](#container-collector)). It is a single static Go
+binary that runs as an unprivileged user from a systemd timer (or cron) and exits when it is done.
+It does not stay running, update itself or listen on any port.
 
 ## Specification
 
 The design is in the smoke-docs repository:
 [OS-DETECTION-PLAN.zh-TW.md](https://gitlab.aircraft.tw/smoke/smoke-docs/-/blob/main/plan/OS-DETECTION-PLAN.zh-TW.md)
 (§2 for the data and the `#smoke-host 1` format, §5.1 for the collector, §5.2 for the upload API,
-§5.4 for installation and releases). Change the plan first, then this repository.
+§5.4 for installation and releases, §4a for the container collector, §4b for lockfiles and
+`--scan`). Change the plan first, then this repository.
 
 ## What it collects
 
@@ -74,52 +77,88 @@ smoke-collector run --dry-run
 
 ## Install
 
-On the host asset's page in Smoke, an Admin chooses **Install collector**. Smoke creates an asset
-token (shown once) and the install command:
+On the host asset's page in Smoke, an Admin chooses **Install collector**, ticks what to scan
+(OS packages, application lockfiles, Docker containers) and, for lockfiles, the paths. Smoke
+creates a token for each program that is needed (shown once) and one install command:
 
 ```sh
-curl -fsSL https://smoke.example.com/downloads/collector/install.sh | sudo sh -s -- --url https://smoke.example.com
+curl -fsSL https://smoke.example.com/downloads/collector/install.sh | sudo sh -s -- --url https://smoke.example.com \
+  --lang zh-TW --scan lockfiles,docker --lockfile /srv/billing/current
 ```
+
+`--scan` takes any non-empty comma-separated subset of:
+
+| Item | Program | What it sends |
+| --- | --- | --- |
+| `os` | `smoke-collector` | the OS package inventory (`#smoke-host 1`) |
+| `lockfiles` | `smoke-collector` | the lockfiles at the `--lockfile` paths ([Lockfiles](#lockfiles)) |
+| `docker` | `smoke-container-collector` | the running Docker images and their packages ([Container collector](#container-collector)) |
+
+When `docker` and `os` or `lockfiles` are chosen, one run installs both programs (the download
+and the signature check happen once). Without `--scan`, an existing installation keeps what it
+scans (the run upgrades what is installed), a new installation asks item by item at the terminal
+(OS packages yes, the others no), and a new installation without a terminal scans `os` as 0.2.x
+did. `--scan` never uninstalls the other program: `--scan docker` leaves `smoke-collector` alone,
+and `--scan os` leaves the container collector alone (remove it with `--uninstall --containers`).
+With `os` or `lockfiles` in it, `--scan` replaces `smoke-collector`'s scan list, so
+`--scan lockfiles` turns OS package scanning off.
 
 `install.sh` (POSIX sh) then:
 
-0. shows the installation terms (what it installs, what it collects and sends, your
-   responsibilities, the disclaimer) and continues only when you type `y`; anything else leaves
-   the host unchanged. The language follows `--lang zh-TW|en` (the asset page adds `--lang zh-TW`
-   in Chinese), otherwise `LANG`. The acceptance (version, time, how, `SUDO_USER`) is written to
-   `/etc/smoke-collector/terms-accepted`, and an upgrade asks again only when `TERMS_VERSION` in
-   `install.sh` changes. Without a terminal, read them with `--show-terms` and accept with
+0. shows the installation terms for the chosen items only (what it installs, what it collects
+   and sends, your responsibilities, the disclaimer) as one text, and continues only when you
+   type `y` once; anything else leaves the host unchanged. The language follows
+   `--lang zh-TW|en` (the asset page adds `--lang zh-TW` in Chinese), otherwise `LANG`. Each
+   program writes its acceptance (version, `scans=`, time, how, `SUDO_USER`) to
+   `/etc/smoke-collector/terms-accepted` or `containers.terms-accepted`. A later run asks again
+   only when `TERMS_VERSION` in `install.sh` changes (0.3.0: `2026-11-13.2`, which adds the
+   lockfile section, so every host is asked once more) or an item is chosen that the record does
+   not cover. Without a terminal, read them with `--show-terms --scan LIST` and accept with
    `--accept-terms`;
-1. downloads `LATEST`, the binary for the host architecture (`amd64` or `arm64`), `SHA256SUMS`
+1. downloads `LATEST`, the binaries for the host architecture (`amd64` or `arm64`), `SHA256SUMS`
    and `SHA256SUMS.minisig`;
 2. verifies the minisign signature of `SHA256SUMS` with `openssl` (OpenSSL 3; Alpine:
    `apk add openssl`), so minisign is not needed on the host;
-3. checks the binary's SHA-256;
-4. asks for the token on the terminal with echo off. The token is never accepted as a
-   command-line argument. For unattended installs use `--token-file FILE`;
+3. checks each binary's SHA-256;
+4. asks for the tokens on the terminal with echo off, `smoke-collector`'s first, then the
+   container collector's; each prompt names its program. A token is never accepted as a
+   command-line argument. For unattended installs use `--token-file FILE` (smoke-collector) and
+   `--containers-token-file FILE`;
 5. creates the `smoke-collector` system user, installs `/usr/local/bin/smoke-collector`, and
-   writes `/etc/smoke-collector/config` with mode `0640 root:smoke-collector`;
+   writes `/etc/smoke-collector/config` with mode `0640 root:smoke-collector`, including `scan=`
+   and the `lockfile=` lines. With lockfiles it checks, as `smoke-collector`, that each path can
+   be read and prints a `setfacl` example when not (it never changes permissions);
 6. installs `smoke-collector.service` and `smoke-collector.timer` (daily, randomized by up to
-   4 hours, `Persistent=true`). Without systemd (Alpine with OpenRC, for example) it installs a
-   cron entry at a random time of day instead;
-7. runs the collector once and shows the result.
+   4 hours, `Persistent=true`), plus the [lockfile drop-in](#paths-under-home) when needed.
+   Without systemd (Alpine with OpenRC, for example) it installs a cron entry at a random time of
+   day instead;
+7. runs each program once and shows the result.
 
 | Option | Meaning |
 | --- | --- |
 | `--url URL` | Smoke address (`https://` only). |
-| `--token-file FILE` | Read the token from FILE. Without it, a reinstall or upgrade keeps the existing token. |
+| `--scan LIST` | What to scan: `os`, `lockfiles`, `docker` (see above). |
+| `--lockfile PATH` | With `lockfiles`: an absolute directory or lockfile path. Repeatable, at most 20; letters, digits and `. _ - / @ +` only (edit the configuration by hand for others). The paths given replace the configured ones; `--lockfile none` clears them. Without it, an upgrade keeps the configured paths. With `lockfiles` and no path at all, `install.sh` asks at the terminal, or stops without one. |
+| `--token-file FILE` | Read `smoke-collector`'s token from FILE (with only `docker` chosen: the container collector's). Without it, a reinstall or upgrade keeps the existing token. |
+| `--containers-token-file FILE` | Read the container collector's token from FILE. |
+| `--containers` | The same as `--scan docker`. |
+| `--docker-host unix:///PATH` | With `docker`: see [Narrowing Docker access further](#narrowing-docker-access-further). |
 | `--version X.Y.Z` | Install that version instead of `LATEST`. |
 | `--skip-signature` | Skip the signature check. The SHA-256 is still checked. Not recommended. |
-| `--no-service` | Do not install the timer or cron entry. |
-| `--no-run` | Do not run the collector at the end. |
-| `--show-terms` | Print the installation terms and exit (no root needed; with `--containers`, the container collector's). |
+| `--no-service` | Do not install the timers or cron entries. |
+| `--no-run` | Do not run the programs at the end. |
+| `--show-terms` | Print the installation terms for `--scan` (default `os`) and exit (no root needed). |
 | `--accept-terms` | Accept the installation terms without being asked (unattended installs). `--yes` is the same. |
 | `--lang zh-TW\|en` | Language of the terms (default: from `LANG`, otherwise English). |
-| `--uninstall` | Remove the binary, the configuration, the timer or cron entry, the terms record and the user. |
+| `--uninstall` | Remove `smoke-collector`: the binary, the configuration, the timer or cron entry, the lockfile drop-in, the terms record and the user. With `--containers` (or `--scan docker`): the container collector; with `--scan os,docker`: both. |
 | `--verify-signature FILE SIG` | Only verify FILE against SIG with the embedded key (no root needed). |
 | `--insecure-http` | Allow `http://localhost` (testing only). |
 
-To upgrade, run the install command again. To uninstall:
+`install.sh` exits 1 when it stops before installing; otherwise with 0 when every first run
+succeeded, or the exit code of the first failing first run (`smoke-collector`'s first).
+
+To upgrade, run the install command again (without `--scan` it keeps what the host scans). To
+uninstall:
 
 ```sh
 curl -fsSL https://smoke.example.com/downloads/collector/install.sh | sudo sh -s -- --uninstall
@@ -143,21 +182,41 @@ smoke-collector print-config [--config PATH] [--insecure-http]
 smoke-collector version
 ```
 
-- `run` collects the inventory and uploads it (the timer runs this).
-- `run --dry-run` prints the exact report and makes no network connection. It needs no
-  configuration and works as any user.
-- `print-config` shows the effective settings and where each came from. Only the first 8
-  characters of the token are shown.
+- `run` collects what `scan` lists and uploads it (the timer runs this): with `os` the OS
+  report (`POST /api/v1/collector/report`), then with `lockfiles` the lockfile report
+  (`POST /api/v1/collector/lockfiles`). With only `lockfiles`, no OS inventory is collected or
+  sent.
+- `run --dry-run` prints what would be sent and makes no network connection: the exact OS report,
+  then for each lockfile path its status and every file's name, size and SHA-256 (with the
+  path's `lockfile_digest`), followed by the full contents of each file. It needs no `url` or
+  token and works as any user; it reads the configuration only for `scan` and the paths (when it
+  cannot read the file, it says so and shows the OS report).
+- `print-config` shows the effective settings and where each came from, including `scan` and the
+  lockfile paths. Only the first 8 characters of the token are shown.
 
 ### Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| 0 | Uploaded (`created`), or Smoke already had the same list (`unchanged`) |
-| 1 | Configuration error |
-| 2 | Collecting the inventory failed |
-| 3 | Smoke rejected the upload (4xx, not retried): bad token, wrong asset, malformed report, rate limit |
+| 0 | Every report was uploaded (`created`, or Smoke already had it: `unchanged`) |
+| 1 | Configuration error (nothing is collected or sent) |
+| 2 | Collecting the OS inventory failed |
+| 3 | Smoke rejected an upload (4xx, not retried): bad token, wrong asset, malformed report, rate limit; for lockfiles also 404 from a Smoke without the lockfile endpoint |
 | 4 | Network or server error after 3 retries (exponential backoff, about 5 minutes at most) |
+
+With `scan=os,lockfiles` both parts always run, the OS report first: a failure of one does not
+stop the other (the lockfile report is still sent when the OS inventory cannot be collected, and
+the other way round). The exit code is that of the first part that failed:
+
+| OS report | Lockfile report | Exit code |
+| --- | --- | --- |
+| ok | ok | 0 |
+| 2, 3 or 4 | ok | the OS report's code |
+| ok | 3 or 4 | the lockfile report's code |
+| 2, 3 or 4 | 3 or 4 | the OS report's code |
+
+A lockfile path that cannot be read is not a failure: it is sent with its status (below) and a
+warning is printed.
 
 ## Configuration
 
@@ -168,17 +227,104 @@ url=https://smoke.example.com
 token=smk_...
 # or, instead of token:
 # token_file=/path/to/token
+scan=os,lockfiles
+lockfile=/srv/billing/current
+lockfile=/home/app/shop/package-lock.json
 ```
 
-`SMOKE_COLLECTOR_URL` and `SMOKE_COLLECTOR_TOKEN` override the file. The URL must be `https://`.
-`--insecure-http` allows `http://` only for `localhost`, `127.0.0.1` or `[::1]`, for tests.
+| Key | Meaning |
+| --- | --- |
+| `url` | The Smoke address. |
+| `token` / `token_file` | The asset token, or a file holding it (one of the two). |
+| `scan` | Comma-separated subset of `os`, `lockfiles`, non-empty; not repeatable. Missing means `os` (0.2.x configurations keep working). `docker` is refused: the container collector scans Docker. |
+| `lockfile` | Repeatable, at most 20. An absolute, clean path (a trailing `/` is removed; no `//`, `.` or `..`; at most 512 bytes; no control characters); the same path twice is an error. Required (at least one) when `scan` includes `lockfiles`; ignored with a warning otherwise. |
+
+`SMOKE_COLLECTOR_URL` and `SMOKE_COLLECTOR_TOKEN` override the file (there are no variables for
+`scan` or `lockfile`). The URL must be `https://`. `--insecure-http` allows `http://` only for
+`localhost`, `127.0.0.1` or `[::1]`, for tests.
 
 ## Upload
 
 `POST <url>/api/v1/collector/report` with `Authorization: Bearer <token>`,
 `Content-Type: text/plain; charset=utf-8`, `Content-Encoding: gzip`,
-`User-Agent: smoke-collector/<version> (linux/<arch>)` and `X-Smoke-Collector-Version`.
-Redirects are not followed, so the token cannot be forwarded anywhere else.
+`User-Agent: smoke-collector/<version> (linux/<arch>)`, `X-Smoke-Collector-Version` and
+`X-Smoke-Collector-Scans` (the `scan` list, for example `os,lockfiles`; also sent with the lockfile
+report, so Smoke knows a host that sends only lockfiles is not stale). The lockfile report is
+described [below](#lockfiles). Redirects are not followed, so the token cannot be forwarded
+anywhere else.
+
+## Lockfiles
+
+With `lockfiles` in `scan`, `smoke-collector` reads the application lockfiles at the `lockfile=`
+paths and sends them to Smoke, so Smoke knows which dependency versions are deployed on the host
+(plan §4b). The paths are set on the host by root (`install.sh --lockfile`); Smoke cannot ask the
+collector to read anything else.
+
+Each path is either
+
+- a **directory**: only the supported file names directly inside it are read. Nothing else in it
+  is opened (`.env`, source code, `node_modules`), and subdirectories are not searched; or
+- a **file** whose name is supported.
+
+Supported names: `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`,
+`composer.lock`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, `go.mod`, `Cargo.lock`,
+`gradle.lockfile`, `packages.lock.json`, `pubspec.lock`, and requirements files matching
+`^(?:requirements(?:[-_.][\w.-]+)?|[\w.-]+[-_.]requirements)\.txt$` (case-insensitive; the same
+rule as Smoke). Not `package.json` (only version ranges) and not SBOMs.
+
+Symbolic links are followed (a Capistrano `/srv/app/current` works). Files are opened read-only
+and non-blocking and must be regular files. Limits: 20 MB per file, at most 20 files per path, and
+50 MB for the whole report as sent (JSON, before gzip); a path over a limit is reported as
+`too_large` without its files. Invalid UTF-8 bytes are sent as U+FFFD (with a warning); sizes and
+SHA-256 are those of what is sent, which is what Smoke hashes.
+
+Each path gets a status:
+
+| Status | Meaning |
+| --- | --- |
+| `ok` | The files are sent (`files`: name and full content). |
+| `not_found` | The path does not exist (or a parent is a file). |
+| `unreadable` | Permission denied (on the path, or on one of its lockfiles), or not a regular file or directory. |
+| `no_lockfile` | A directory without a supported name, or a file whose name is not supported. |
+| `too_large` | Over a size or file-count limit. |
+
+`POST <url>/api/v1/collector/lockfiles` with the same headers as the OS report, except
+`Content-Type: application/vnd.smoke.lockfile-report+json` (Smoke checks the token before it
+parses the body), and a body like
+
+```json
+{"lockfiles":[{"path":"/srv/billing/current","status":"ok","files":[{"name":"package-lock.json","content":"…"}]},{"path":"/home/app/shop","status":"unreadable"}]}
+```
+
+Smoke answers per path with a `result` (`created`, `unchanged`, `older_version`,
+`source_preferred`, `unmapped`, `archived`, `failed`, `skipped`), which `run` prints. A path is
+written only to the asset an Admin linked to this host with that path; unlinked paths are listed
+on the host page. Smoke strips credentials in URLs inside lockfiles and deletes the originals
+within 24 hours.
+
+### Permissions
+
+The collector reads with the `smoke-collector` account's permissions. `install.sh` checks each
+path as that account (including search permission on the parent directories) and, when it cannot
+read one, prints a `setfacl` example such as
+`setfacl -m u:smoke-collector:rX /srv/app/current`. It never changes permissions itself.
+
+### Paths under /home
+
+The unit has `ProtectHome=yes`, which hides `/home`, `/root` and `/run/user` (`ProtectSystem=strict`
+only makes the file system read-only; `/srv`, `/var/www` and `/opt` stay readable). For lockfile
+paths under those directories (or symbolic links that lead there), `install.sh` writes
+`/etc/systemd/system/smoke-collector.service.d/lockfiles.conf`:
+
+```ini
+[Service]
+ProtectHome=tmpfs
+BindReadOnlyPaths=-/home/app/shop
+```
+
+so only those paths are visible to the service, read-only (`-`: a missing path does not stop the
+service; it is reported as `not_found`). The drop-in is removed when no such path is configured
+and by `--uninstall`. Cron hosts have no sandbox; only the account's permissions apply.
 
 ## Security notes
 
@@ -188,8 +334,12 @@ Redirects are not followed, so the token cannot be forwarded anywhere else.
   (cgroup, cmdline, and maps where the kernel allows it), the ELF headers of service programs
   and libraries (regular files of at most 256 MB, opened read-only and non-blocking) and the dpkg
   file lists (on rpm hosts it asks `rpm` instead). It executes none of those files.
+- With lockfiles, it opens only the configured paths and the supported names directly inside
+  them, and sends only those files. The paths come from the host's configuration, never from
+  Smoke.
 - The systemd unit runs it as `smoke-collector` with
-  `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`, an
+  `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome` (relaxed only by the lockfile
+  drop-in above), `PrivateTmp`, `PrivateDevices`, an
   empty capability set, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6` (AF_UNIX lets
   `systemctl` reach D-Bus) and `SystemCallFilter=@system-service`. See
   [systemd/smoke-collector.service](systemd/smoke-collector.service).
@@ -209,7 +359,8 @@ make build-linux    # bin/smoke-collector_linux_{amd64,arm64}, bin/smoke-contain
 make test-identity  # Docker: --dry-run vs the plan's shell commands on ubuntu:24.04, debian:12, alpine:3.21, rockylinux:9, almalinux:9, ubi9
 make test-signing   # minisign -S -l + install.sh's openssl check, with a throwaway key (needs minisign, OpenSSL 3)
 make test-install   # Docker: install.sh end to end against a fake Smoke (test/fakesmoke), cron path,
-                    # including --containers against a fake Docker Engine socket
+                    # including --containers against a fake Docker Engine socket, --scan and
+                    # lockfiles, and the systemd drop-in with a stand-in systemctl
                     # (INSTALL_TEST_IMAGES="nginx:1.27:deb nginx:alpine:apk" to use other images)
 make test-container-identity  # Docker: the container collector's #os-release/#packages vs the page
                     # command in the same container (local images only, --pull never;
@@ -238,7 +389,7 @@ minisign -G -p ~/.minisign/smoke-collector.pub -s ~/.minisign/smoke-collector.ke
 Each release:
 
 ```sh
-SMOKE_REGISTRY=registry.example.com scripts/release.sh 0.1.0
+SMOKE_REGISTRY=registry.example.com scripts/release.sh 0.3.0
 ```
 
 This builds `smoke-collector` and `smoke-container-collector` for amd64 and arm64 with the
@@ -254,12 +405,12 @@ The image is busybox with the download tree under `/dist`, laid out like `/downl
 /dist/install.sh
 /dist/LATEST
 /dist/smoke-collector.pub
-/dist/v0.1.0/smoke-collector_linux_amd64
-/dist/v0.1.0/smoke-collector_linux_arm64
-/dist/v0.1.0/smoke-container-collector_linux_amd64   (from 0.2.0)
-/dist/v0.1.0/smoke-container-collector_linux_arm64   (from 0.2.0)
-/dist/v0.1.0/SHA256SUMS
-/dist/v0.1.0/SHA256SUMS.minisig
+/dist/v0.3.0/smoke-collector_linux_amd64
+/dist/v0.3.0/smoke-collector_linux_arm64
+/dist/v0.3.0/smoke-container-collector_linux_amd64   (from 0.2.0)
+/dist/v0.3.0/smoke-container-collector_linux_arm64   (from 0.2.0)
+/dist/v0.3.0/SHA256SUMS
+/dist/v0.3.0/SHA256SUMS.minisig
 ```
 
 On the App VM, a one-shot compose service copies it into the volume nginx serves:
@@ -280,15 +431,17 @@ Keeping it apart leaves `smoke-collector` unprivileged and lets each host decide
 install it.
 
 ```sh
-curl -fsSL https://<smoke>/downloads/collector/install.sh | sudo sh -s -- --url https://<smoke> --containers
+curl -fsSL https://<smoke>/downloads/collector/install.sh | sudo sh -s -- --url https://<smoke> --scan docker
 ```
 
-Its installation terms state the docker group privilege, and you accept them by typing `y`
+(`--containers` is the same as `--scan docker`; `--scan os,docker` installs both programs in one
+run.) Its installation terms state the docker group privilege, and you accept them by typing `y`
 (unattended: `--accept-terms`, or `--yes`; recorded in
-`/etc/smoke-collector/containers.terms-accepted`; to use a filtering proxy socket instead of the
-docker group, see `--docker-host` below). It then asks for the token created
-with "Install container collector" on the host page (scope `containers:write`; it cannot write
-the host's OS inventory). It creates the `smoke-container` user in the `docker` group,
+`/etc/smoke-collector/containers.terms-accepted` with `scans=docker`; to use a filtering proxy
+socket instead of the docker group, see `--docker-host` below). It then asks for the container
+collector's token created by "Install collector" on the host page (scope `containers:write`; it
+cannot write the host's OS inventory; unattended: `--containers-token-file`, or `--token-file`
+when only `docker` is chosen). It creates the `smoke-container` user in the `docker` group,
 `/usr/local/bin/smoke-container-collector`, `/etc/smoke-collector/containers.config` (0640
 root:smoke-container; keys `url`, `token` or `token_file`, `docker_host`) and a daily
 `smoke-container-collector.timer` (or cron entry). `--uninstall --containers` removes only the

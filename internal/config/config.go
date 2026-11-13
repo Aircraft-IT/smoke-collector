@@ -3,6 +3,7 @@
 // SMOKE_COLLECTOR_URL and SMOKE_COLLECTOR_TOKEN environment variables.
 // The container collector (plan §4a, spec FR-COL-08) uses the same rules with its own
 // file, variables, endpoint and the extra docker_host key (ContainerCollector).
+// The OS collector also has the scan and repeatable lockfile keys (plan §4b, decision 8).
 //
 // The token is a secret. No error message or warning produced here contains
 // it, or any line of the configuration file (a token may sit on a malformed line).
@@ -21,6 +22,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"gitlab.aircraft.tw/smoke/smoke-collector/internal/lockfiles"
 )
 
 const (
@@ -46,10 +49,21 @@ type Spec struct {
 	EnvDockerHost string
 	// ReportPath is the upload API, relative to the Smoke URL.
 	ReportPath string
+	// Scans says the program has the scan and lockfile keys (the OS collector).
+	Scans bool
 }
 
 // Collector is the OS collector (smoke-collector).
-var Collector = Spec{Path: DefaultPath, EnvURL: EnvURL, EnvToken: EnvToken, ReportPath: ReportPath}
+var Collector = Spec{Path: DefaultPath, EnvURL: EnvURL, EnvToken: EnvToken, ReportPath: ReportPath, Scans: true}
+
+// What the OS collector can scan (the scan key). docker belongs to smoke-container-collector.
+const (
+	ScanOS        = "os"
+	ScanLockfiles = "lockfiles"
+)
+
+// scanOrder is the canonical order of the scan list (and of X-Smoke-Collector-Scans).
+var scanOrder = []string{ScanOS, ScanLockfiles}
 
 // ContainerCollector is the container collector (smoke-container-collector, spec FR-COL-08).
 var ContainerCollector = Spec{
@@ -91,6 +105,12 @@ type Config struct {
 	DockerHost       string
 	DockerHostSource Source
 
+	// Scans is the scan list in canonical order (OS collector only; [os] when not set).
+	Scans      []string
+	ScanSource Source
+	// Lockfiles are the lockfile= paths (OS collector only), checked and in file order.
+	Lockfiles []string
+
 	// InsecureHTTP allows an http:// URL for localhost (tests only); set from the command line.
 	InsecureHTTP bool
 
@@ -101,11 +121,23 @@ type Config struct {
 }
 
 // Error is a configuration error (exit code 1).
-type Error struct{ msg string }
+type Error struct {
+	msg string
+	err error
+}
 
 func (e *Error) Error() string { return e.msg }
 
+// Unwrap returns the underlying error (for errors.Is(err, fs.ErrPermission)), if any.
+func (e *Error) Unwrap() error { return e.err }
+
 func errorf(format string, args ...any) error { return &Error{msg: fmt.Sprintf(format, args...)} }
+
+// readError is errorf for a failed read of path; it keeps err for errors.Is.
+func readError(what, path string, err error) error {
+	err = unwrapPathError(err)
+	return &Error{msg: fmt.Sprintf("cannot read %s %s: %v", what, path, err), err: err}
+}
 
 var keyRe = regexp.MustCompile(`^[a-z_]{1,32}$`)
 
@@ -119,6 +151,9 @@ func Load(path string, getenv func(string) string) (*Config, error) {
 // LoadSpec is Load for the program described by spec.
 func LoadSpec(spec Spec, path string, getenv func(string) string) (*Config, error) {
 	c := &Config{Path: path, spec: spec}
+	if spec.Scans {
+		c.Scans = []string{ScanOS}
+	}
 	if err := c.loadFile(path); err != nil {
 		return nil, err
 	}
@@ -144,6 +179,9 @@ func (c *Config) knownKeys() []string {
 	if c.spec.EnvDockerHost != "" {
 		keys = append(keys, "docker_host")
 	}
+	if c.spec.Scans {
+		keys = append(keys, "scan", "lockfile")
+	}
 	return keys
 }
 
@@ -153,7 +191,7 @@ func (c *Config) loadFile(path string) error {
 		return nil
 	}
 	if err != nil {
-		return errorf("cannot read configuration file %s: %v", path, unwrapPathError(err))
+		return readError("configuration file", path, err)
 	}
 	defer f.Close()
 	st, err := f.Stat()
@@ -173,6 +211,8 @@ func (c *Config) loadFile(path string) error {
 	c.FileFound = true
 
 	values := map[string]string{}
+	var lockfileLines []int
+	var lockfilePaths []string
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	sc.Buffer(make([]byte, 0, 4096), maxFileBytes+1)
 	for n := 1; sc.Scan(); n++ {
@@ -189,6 +229,11 @@ func (c *Config) loadFile(path string) error {
 		if !slices.Contains(c.knownKeys(), k) {
 			return errorf("%s line %d: unknown key %q (known: %s)", path, n, k, strings.Join(c.knownKeys(), ", "))
 		}
+		if k == "lockfile" { // repeatable
+			lockfileLines = append(lockfileLines, n)
+			lockfilePaths = append(lockfilePaths, unquote(strings.TrimSpace(v)))
+			continue
+		}
 		if _, dup := values[k]; dup {
 			return errorf("%s line %d: %s is set twice", path, n, k)
 		}
@@ -203,6 +248,16 @@ func (c *Config) loadFile(path string) error {
 	}
 	if v := values["docker_host"]; v != "" {
 		c.DockerHost, c.DockerHostSource = v, SourceFile
+	}
+	if v, ok := values["scan"]; ok {
+		scans, err := ParseScans(v)
+		if err != nil {
+			return errorf("%s: scan: %v", path, err)
+		}
+		c.Scans, c.ScanSource = scans, SourceFile
+	}
+	if err := c.setLockfiles(path, lockfileLines, lockfilePaths); err != nil {
+		return err
 	}
 	tok, tokFile := values["token"], values["token_file"]
 	switch {
@@ -224,10 +279,87 @@ func (c *Config) loadFile(path string) error {
 	return nil
 }
 
+// setLockfiles checks the lockfile= values (lines are their line numbers).
+func (c *Config) setLockfiles(file string, lines []int, paths []string) error {
+	if len(paths) > lockfiles.MaxPaths {
+		return errorf("%s line %d: at most %d lockfile lines", file, lines[lockfiles.MaxPaths], lockfiles.MaxPaths)
+	}
+	seen := map[string]int{}
+	for i, raw := range paths {
+		p, err := lockfiles.CheckPath(raw)
+		if err != nil {
+			// The value is a path set by root, not a secret, but stay with the rule above.
+			return errorf("%s line %d: lockfile %v", file, lines[i], err)
+		}
+		if first, dup := seen[p]; dup {
+			return errorf("%s line %d: lockfile %s is already on line %d", file, lines[i], p, first)
+		}
+		seen[p] = lines[i]
+		c.Lockfiles = append(c.Lockfiles, p)
+	}
+	return nil
+}
+
+// ParseScans parses a scan value: a comma-separated, non-empty subset of os and lockfiles
+// (blanks around items are ignored, duplicates are merged). The result is in canonical order.
+func ParseScans(v string) ([]string, error) {
+	set := map[string]bool{}
+	for _, item := range strings.Split(v, ",") {
+		item = strings.TrimSpace(item)
+		switch item {
+		case ScanOS, ScanLockfiles:
+			set[item] = true
+		case "":
+			return nil, errorf("expected a comma-separated list of os, lockfiles")
+		case "docker":
+			return nil, errorf("docker is scanned by smoke-container-collector, not smoke-collector (install.sh --scan docker installs it)")
+		case "lockfile":
+			return nil, errorf("unknown item lockfile (did you mean lockfiles?)")
+		default:
+			// Not quoted: the rule above (no part of a line in an error).
+			return nil, errorf("unknown item (known: os, lockfiles)")
+		}
+	}
+	var out []string
+	for _, s := range scanOrder {
+		if set[s] {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+// Scanning reports whether the scan list contains s.
+func (c *Config) Scanning(s string) bool { return slices.Contains(c.Scans, s) }
+
+// ScanHeader is the X-Smoke-Collector-Scans value: the scan list, comma-separated, no spaces.
+func (c *Config) ScanHeader() string { return strings.Join(c.Scans, ",") }
+
+// ValidateScans checks the scan list against the lockfile paths: lockfiles needs at least one
+// lockfile line. Lockfile lines without lockfiles in scan are ignored with a warning.
+// Validate calls it; run --dry-run calls it alone (no url or token needed).
+func (c *Config) ValidateScans() error {
+	if !c.Spec().Scans {
+		return nil
+	}
+	if c.Scanning(ScanLockfiles) && len(c.Lockfiles) == 0 {
+		return errorf("scan includes lockfiles but no lockfile=/path line is set in %s (install.sh --lockfile PATH)", c.Path)
+	}
+	return nil
+}
+
+// IgnoredLockfiles is the warning for lockfile lines that are not used, or "".
+func (c *Config) IgnoredLockfiles() string {
+	if c.Spec().Scans && len(c.Lockfiles) > 0 && !c.Scanning(ScanLockfiles) {
+		return fmt.Sprintf("%d lockfile line(s) ignored: scan does not include lockfiles", len(c.Lockfiles))
+	}
+	return ""
+}
+
 func readTokenFile(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", errorf("cannot read token_file %s: %v", path, unwrapPathError(err))
+		return "", readError("token_file", path, err)
 	}
 	defer f.Close()
 	data, err := io.ReadAll(io.LimitReader(f, maxTokenBytes+64))
@@ -277,7 +409,7 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
-	return nil
+	return c.ValidateScans()
 }
 
 // Spec is the program the configuration was loaded for (Collector for a zero Config).
@@ -291,6 +423,11 @@ func (c *Config) Spec() Spec {
 // Endpoint is the report endpoint of the configured URL (see EndpointFor).
 func (c *Config) Endpoint() (string, error) {
 	return EndpointFor(c.URL, c.InsecureHTTP, c.Spec().ReportPath)
+}
+
+// LockfileEndpoint is the lockfile endpoint of the configured URL (OS collector).
+func (c *Config) LockfileEndpoint() (string, error) {
+	return EndpointFor(c.URL, c.InsecureHTTP, lockfiles.ReportPath)
 }
 
 // DockerSocket returns the socket path of a docker_host value: only unix:// with an absolute,

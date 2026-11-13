@@ -2,7 +2,7 @@
 GO ?= go
 GOLANGCI_LINT ?= golangci-lint
 BIN := bin
-VERSION ?= 0.1.0-dev
+VERSION ?= 0.3.0-dev
 LDFLAGS := -s -w -X gitlab.aircraft.tw/smoke/smoke-collector/internal/version.Version=$(VERSION)
 
 .PHONY: all build build-linux test lint fmt tidy test-identity test-container-identity test-signing test-install test-all release

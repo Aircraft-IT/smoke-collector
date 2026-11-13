@@ -29,7 +29,7 @@ mode() { stat -c '%a %U:%G' "$1" 2>/dev/null; }
 
 if command -v curl >/dev/null; then fetch="curl -fsSL"; else fetch="wget -qO-"; fi
 cp -R /t/dist /tmp/www
-/t/fakesmoke -addr :8080 -dir /tmp/www -token-file /t/token -save /tmp/last-report.txt >/tmp/fakesmoke.log 2>&1 &
+/t/fakesmoke -addr :8080 -dir /tmp/www -token-file /t/token -save /tmp/last-report.txt -save-lockfiles /tmp/last-lockfiles.json >/tmp/fakesmoke.log 2>&1 &
 i=0
 until $fetch "$URL/downloads/collector/LATEST" >/dev/null 2>&1; do
 	i=$((i + 1)); [ $i -lt 50 ] || { echo "fakesmoke did not start"; cat /tmp/fakesmoke.log; exit 1; }
@@ -126,7 +126,7 @@ check "binary, config, cron entries and user are gone" sh -c '! [ -e /usr/local/
 # Interactive install: the token is typed at the /dev/tty prompt (a pty from script(1)) with
 # echo off, so it must not appear in what the terminal shows.
 if command -v script >/dev/null; then
-	cmd="sh /tmp/install.sh --url $URL --insecure-http $sigflag --no-service --no-run --lang en"
+	cmd="sh /tmp/install.sh --url $URL --insecure-http $sigflag --no-service --no-run --lang en --scan os"
 	(sleep 2; printf 'n\n'; sleep 1) | script -q -c "$cmd" /dev/null >/tmp/out 2>&1
 	if grep -q "Type y to accept" /tmp/out && grep -q "terms not accepted" /tmp/out && ! [ -e /usr/local/bin/smoke-collector ]; then
 		ok "answering n at the terms prompt installs nothing"
@@ -248,6 +248,196 @@ expect 0 "removed smoke-container from the docker group" "re-install with --dock
 if in_docker; then echo "in docker group" >/tmp/out; bad "  ...not in the docker group any more"; else ok "  ...not in the docker group any more"; fi
 expect 0 "removed" "--uninstall --containers" sh /repo/install.sh --uninstall --containers
 cat /tmp/fakesmoke3.log >>/tmp/all-output
+
+# --- lockfiles and --scan (plan §4b, decision 8) ------------------------------------------------
+# Fixtures: a Capistrano-style symlinked release with a .env next to the lockfile, an app under
+# /home that smoke-collector cannot enter, and a lockfile it cannot read.
+mkdir -p /srv/billing/releases/1 /home/app/shop /home/app/other /srv/closed /root/app
+printf '{"lockfileVersion": 3, "packages": {}}\n' >/srv/billing/releases/1/package-lock.json
+printf 'SECRET=never-sent\n' >/srv/billing/releases/1/.env
+ln -s /srv/billing/releases/1 /srv/billing/current
+printf 'flask==3.0.0\n' >/home/app/shop/requirements.txt
+printf 'module example.com/other\n' >/home/app/other/go.mod
+ln -s /home/app/other /srv/otherlink
+printf 'version = 1\n' >/root/app/uv.lock
+chmod 0700 /home/app
+printf '# yarn lockfile v1\n' >/srv/closed/yarn.lock
+chmod 0600 /srv/closed/yarn.lock
+reports() { grep -cE 'report (created|unchanged)' /tmp/fakesmoke.log; }
+
+expect 1 "add --lockfile PATH" "--scan lockfiles without a path and without a terminal stops" \
+	pipe_install --scan lockfiles --token-file /t/token $sigflag --yes
+check "  ...and nothing was installed" sh -c '! [ -e /usr/local/bin/smoke-collector ] && ! [ -e /etc/smoke-collector ]'
+expect 1 "needs lockfiles in --scan" "--lockfile with --scan os is refused" pipe_install --scan os --lockfile /srv/x --token-file /t/token $sigflag --yes
+expect 1 "must be an absolute path" "a relative --lockfile is refused" pipe_install --scan lockfiles --lockfile srv/x --token-file /t/token $sigflag --yes
+expect 1 "must be a clean path" "--lockfile with .. is refused" pipe_install --scan lockfiles --lockfile /srv/../etc --token-file /t/token $sigflag --yes
+expect 1 "accepts only letters" "--lockfile with a blank is refused" pipe_install --scan lockfiles --lockfile "/srv/my app" --token-file /t/token $sigflag --yes
+expect 1 "unknown item docker2" "--scan with an unknown item is refused" pipe_install --scan os,docker2 --token-file /t/token $sigflag --yes
+
+# Lockfiles only: no OS report.
+before=$(reports)
+expect 0 "lockfile report accepted (HTTP 200, 3 paths" "install --scan lockfiles: only the lockfile report is sent" \
+	pipe_install --scan lockfiles --lockfile /srv/billing/current/ --lockfile /home/app/shop --lockfile /srv/closed --token-file /t/token $sigflag --yes
+check "  ...no OS report" [ "$(reports)" = "$before" ]
+grep -q 'lockfile report accepted: 3 paths, [0-9]* bytes scans="lockfiles"' /tmp/fakesmoke.log && ok "  ...with X-Smoke-Collector-Scans: lockfiles" || bad "  ...scans header: $(tail -3 /tmp/fakesmoke.log)"
+grep -q "/srv/billing/current: created" /tmp/out && ok "  ...per-path results printed" || bad "  ...per-path results"
+grep -qF "cannot read /home/app/shop" /tmp/out && grep -qF "setfacl -m u:smoke-collector:rX /home/app/shop" /tmp/out &&
+	ok "  ...warns that smoke-collector cannot enter /home/app/shop, with a setfacl example" || bad "  ...unreadable directory warning"
+grep -qF "setfacl -m u:smoke-collector:r /srv/closed/yarn.lock" /tmp/out && ok "  ...and that it cannot read /srv/closed/yarn.lock" || bad "  ...unreadable file warning"
+check "  ...permissions not changed" sh -c '[ "$(stat -c %a /home/app)" = 700 ] && [ "$(stat -c %a /srv/closed/yarn.lock)" = 600 ]'
+check "config: scan=lockfiles and the three paths (trailing / removed)" sh -c 'grep -qx "scan=lockfiles" /etc/smoke-collector/config &&
+	[ "$(grep -c "^lockfile=" /etc/smoke-collector/config)" = 3 ] && grep -qx "lockfile=/srv/billing/current" /etc/smoke-collector/config &&
+	grep -qx "lockfile=/home/app/shop" /etc/smoke-collector/config && grep -qx "lockfile=/srv/closed" /etc/smoke-collector/config'
+check "the report: the symlinked release read, unreadable paths reported, .env not sent" sh -c '
+	grep -qF "\"path\":\"/srv/billing/current\",\"status\":\"ok\",\"files\":[{\"name\":\"package-lock.json\"" /tmp/last-lockfiles.json &&
+	grep -qF "\"path\":\"/home/app/shop\",\"status\":\"unreadable\"" /tmp/last-lockfiles.json &&
+	grep -qF "\"path\":\"/srv/closed\",\"status\":\"unreadable\"" /tmp/last-lockfiles.json && ! grep -q never-sent /tmp/last-lockfiles.json'
+check "terms record: version 2026-11-13.2, scans=lockfiles" sh -c 'grep -qx "terms_version=2026-11-13.2" /etc/smoke-collector/terms-accepted &&
+	grep -qx "scans=lockfiles" /etc/smoke-collector/terms-accepted'
+expect 0 "scan:          lockfiles (config file)" "print-config shows the scan" runas "/usr/local/bin/smoke-collector print-config --insecure-http"
+grep -qx "lockfile:      /srv/billing/current" /tmp/out && ok "  ...and the lockfile paths" || bad "  ...lockfile paths"
+expect 0 "#lockfile /srv/billing/current/package-lock.json (" "--dry-run as smoke-collector prints every lockfile in full" \
+	runas "/usr/local/bin/smoke-collector run --dry-run"
+grep -qF '{"lockfileVersion": 3, "packages": {}}' /tmp/out && grep -q "^/home/app/shop: unreadable" /tmp/out && ! grep -q "#smoke-host" /tmp/out &&
+	ok "  ...contents, statuses, no OS report" || bad "  ...dry-run content"
+
+# Upgrade without --scan: the scan list, the paths and the token are kept.
+expect 0 "keeping what the existing installation scans: lockfiles" "upgrade without --scan keeps the scan" pipe_install $sigflag --no-run
+grep -q "keeping the lockfile paths" /tmp/out && grep -q "already accepted on this host" /tmp/out && grep -q "keeping the token" /tmp/out &&
+	ok "  ...and the paths, the terms and the token" || bad "  ...upgrade messages"
+check "  ...config unchanged" sh -c 'grep -qx "scan=lockfiles" /etc/smoke-collector/config && [ "$(grep -c "^lockfile=" /etc/smoke-collector/config)" = 3 ]'
+
+# os,lockfiles: os was not accepted for this host yet, so the terms are asked again.
+expect 1 "terms must be accepted first" "adding os to the scan asks for the terms again" pipe_install --scan os,lockfiles $sigflag --no-run
+before=$(reports)
+expect 0 "lockfile report accepted" "install --scan os,lockfiles --yes: both reports" pipe_install --scan os,lockfiles $sigflag --yes
+check "  ...one OS report" [ "$(reports)" = $((before + 1)) ]
+check "  ...both with X-Smoke-Collector-Scans: os,lockfiles" sh -c 'tail -2 /tmp/fakesmoke.log | grep -c "scans=\"os,lockfiles\"" | grep -qx 2'
+check "  ...config scan=os,lockfiles with the paths kept" sh -c 'grep -qx "scan=os,lockfiles" /etc/smoke-collector/config && [ "$(grep -c "^lockfile=" /etc/smoke-collector/config)" = 3 ]'
+check "  ...terms record scans=os,lockfiles" grep -qx "scans=os,lockfiles" /etc/smoke-collector/terms-accepted
+
+# --lockfile none.
+expect 1 "no lockfile path is set" "--scan os,lockfiles --lockfile none without a terminal stops" \
+	pipe_install --scan os,lockfiles --lockfile none $sigflag --no-run
+expect 0 "" "--scan os --lockfile none" pipe_install --scan os --lockfile none $sigflag --no-run
+check "  ...config scan=os without lockfile lines" sh -c 'grep -qx "scan=os" /etc/smoke-collector/config && ! grep -q "^lockfile=" /etc/smoke-collector/config'
+
+# A terms record of the previous version (0.2.1) is asked again.
+sed -i -e 's/^terms_version=.*/terms_version=2026-11-13/' -e '/^scans=/d' /etc/smoke-collector/terms-accepted
+expect 1 "terms must be accepted first" "terms of an older version are asked again on upgrade" pipe_install $sigflag --no-run
+expect 0 "accepted with --accept-terms" "  ...and accepted with --yes" pipe_install $sigflag --no-run --yes
+check "  ...record updated" sh -c 'grep -qx "terms_version=2026-11-13.2" /etc/smoke-collector/terms-accepted && grep -qx "scans=os" /etc/smoke-collector/terms-accepted'
+expect 0 "removed" "--uninstall" sh /repo/install.sh --uninstall
+
+# The terms list only the chosen items.
+expect 0 "Application lockfiles (smoke-collector)" "--show-terms --scan lockfiles" sh /tmp/install.sh --show-terms --scan lockfiles --lang en
+grep -q ".env" /tmp/out && grep -q "within 24" /tmp/out && ! grep -q "installed packages" /tmp/out && ! grep -q "docker group" /tmp/out &&
+	ok "  ...the lockfile section (.env not read, originals deleted within 24 h), no OS or Docker section" || bad "  ...lockfile terms sections"
+expect 0 "24 小時內刪除" "--show-terms --scan lockfiles --lang zh-TW" sh /tmp/install.sh --show-terms --scan lockfiles --lang zh-TW
+grep -q "\.env" /tmp/out && ! grep -q "docker 群組" /tmp/out && ok "  ...in Chinese, without Docker" || bad "  ...zh lockfile terms"
+expect 0 "docker 群組" "--show-terms --scan os,docker --lang zh-TW" sh /tmp/install.sh --show-terms --scan os,docker --lang zh-TW
+grep -q "OS 套件（smoke-collector）" /tmp/out && ! grep -q "應用程式 lockfile（" /tmp/out && grep -qF -- "--uninstall --containers" /tmp/out &&
+	ok "  ...OS and Docker sections, no lockfile section, both uninstall commands" || bad "  ...os,docker terms"
+
+# systemd drop-in, with a stand-in systemctl (no systemd runs in these containers): the real unit
+# and drop-in files are written, systemctl calls are only logged.
+mkdir -p /run/systemd/system /etc/systemd/system
+printf '#!/bin/sh\necho "systemctl $*" >>/tmp/systemctl.log\n' >/usr/local/bin/systemctl
+chmod 0755 /usr/local/bin/systemctl
+dropin=/etc/systemd/system/smoke-collector.service.d/lockfiles.conf
+expect 0 "wrote $dropin" "lockfiles under /home: the systemd drop-in is written" \
+	pipe_install --scan lockfiles --lockfile /home/app/shop --lockfile /srv/billing/current --lockfile /srv/otherlink \
+	--token-file /t/token $sigflag --yes --no-run
+check "  ...ProtectHome=tmpfs and one BindReadOnlyPaths per path under /home (a symlink resolved), none for /srv" sh -c "
+	grep -qx 'ProtectHome=tmpfs' $dropin && grep -qx 'BindReadOnlyPaths=-/home/app/shop' $dropin &&
+	grep -qx 'BindReadOnlyPaths=-/home/app/other' $dropin && [ \$(grep -c '^BindReadOnlyPaths=' $dropin) = 2 ] &&
+	grep -qx '\[Service\]' $dropin && [ \"\$(stat -c %a $dropin)\" = 644 ]"
+check "  ...units installed, daemon-reload and timer enabled" sh -c 'grep -q "^ProtectHome=yes" /etc/systemd/system/smoke-collector.service &&
+	grep -q "^systemctl daemon-reload" /tmp/systemctl.log && grep -q "^systemctl enable --now smoke-collector.timer" /tmp/systemctl.log'
+expect 0 "removed $dropin" "no path under /home any more: the drop-in is removed" \
+	pipe_install --scan lockfiles --lockfile /srv/billing/current $sigflag --no-run
+check "  ...with its directory" sh -c '! [ -e /etc/systemd/system/smoke-collector.service.d ]'
+expect 0 "wrote $dropin" "a path under /root" pipe_install --scan os,lockfiles --lockfile /root/app $sigflag --yes --no-run
+check "  ...BindReadOnlyPaths=-/root/app" grep -qx "BindReadOnlyPaths=-/root/app" "$dropin"
+expect 0 "removed" "--uninstall removes the drop-in" sh /repo/install.sh --uninstall
+check "  ...units and drop-in gone" sh -c '! [ -e /etc/systemd/system/smoke-collector.service.d ] && ! [ -e /etc/systemd/system/smoke-collector.service ]'
+rm -f /usr/local/bin/systemctl
+rmdir /run/systemd/system
+
+# Both programs in one run, two token files. A fourth fakesmoke checks each program's token; the
+# container collector reads the fake Docker Engine on /var/run/docker.sock (fakesmoke 2), never a
+# real Docker.
+printf 'smk_container_test_%s\n' "$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')" >/tmp/ctoken
+CTOKEN=$(cat /tmp/ctoken)
+/t/fakesmoke -addr :8083 -dir /tmp/www -token-file /t/token -containers-token-file /tmp/ctoken \
+	-save-lockfiles /tmp/last-lockfiles4.json >/tmp/fakesmoke4.log 2>&1 &
+URL4=http://localhost:8083
+i=0
+until $fetch "$URL4/downloads/collector/LATEST" >/dev/null 2>&1; do
+	i=$((i + 1)); [ $i -lt 50 ] || { echo "fakesmoke 4 did not start"; cat /tmp/fakesmoke4.log; exit 1; }
+	sleep 0.1
+done
+pipe4() { $fetch "$URL/downloads/collector/install.sh" | sh -s -- --url "$URL4" --insecure-http "$@"; }
+expect 1 "only for --containers" "--containers-token-file without docker is refused" \
+	pipe4 --scan os --token-file /t/token --containers-token-file /tmp/ctoken $sigflag --yes
+expect 0 "report accepted (HTTP 200, 1 images" "install --scan os,docker with two token files: both programs, both first runs" \
+	pipe4 --scan os,docker --token-file /t/token --containers-token-file /tmp/ctoken $sigflag --yes
+grep -q "report created" /tmp/out && ok "  ...the OS report with the OS token" || bad "  ...OS report"
+grep -q "downloading smoke-collector smoke-container-collector" /tmp/out && ok "  ...one download step for both" || bad "  ...download"
+if [ -z "$sigflag" ]; then
+	check "  ...SHA256SUMS verified once" [ "$(grep -c "signature of SHA256SUMS verified" /tmp/out)" = 1 ]
+fi
+check "  ...each configuration has its own token" sh -c "grep -qx 'token=$TOKEN' /etc/smoke-collector/config && grep -qx 'token=$CTOKEN' /etc/smoke-collector/containers.config"
+check "  ...two terms records: scans=os and scans=docker" sh -c 'grep -qx "scans=os" /etc/smoke-collector/terms-accepted &&
+	grep -qx "scans=docker" /etc/smoke-collector/containers.terms-accepted &&
+	grep -qx "terms_version=2026-11-13.2" /etc/smoke-collector/containers.terms-accepted'
+check "  ...shared dir 0751, smoke-container in the docker group" sh -c '[ "$(stat -c %a /etc/smoke-collector)" = 751 ] &&
+	id -nG smoke-container | tr " " "\n" | grep -qx docker && ! id -nG smoke-collector | tr " " "\n" | grep -qx docker'
+grep -q "container report accepted: 1 images" /tmp/fakesmoke4.log && grep -q 'report created: .* scans="os"' /tmp/fakesmoke4.log &&
+	ok "fakesmoke 4: OS report (scans os) and container report, each with its token" || bad "fakesmoke 4 log: $(cat /tmp/fakesmoke4.log)"
+check "the fake Docker Engine was asked for nothing outside the allowlist" sh -c '! grep -q "docker: refused" /tmp/fakesmoke2.log'
+cp /etc/smoke-collector/containers.config /tmp/containers.config.before
+expect 0 "lockfile report accepted" "--scan lockfiles leaves the container collector alone" pipe4 --scan lockfiles --lockfile /srv/billing/current $sigflag --yes
+check "  ...containers.config unchanged and no container run" sh -c 'cmp -s /tmp/containers.config.before /etc/smoke-collector/containers.config &&
+	! grep -q smoke-container-collector /tmp/out && grep -qx "scan=lockfiles" /etc/smoke-collector/config'
+expect 0 "report accepted (HTTP 200, 1 images" "--scan docker leaves smoke-collector alone" pipe4 --scan docker $sigflag --yes
+check "  ...smoke-collector not reinstalled or run" sh -c '! grep -q "installed /usr/local/bin/smoke-collector " /tmp/out && ! grep -q "running smoke-collector " /tmp/out &&
+	grep -qx "scan=lockfiles" /etc/smoke-collector/config'
+expect 0 "keeping what the existing installation scans: lockfiles,docker" "upgrade without --scan upgrades both programs" pipe4 $sigflag --no-run
+grep -q "installed /usr/local/bin/smoke-collector " /tmp/out && grep -q "installed /usr/local/bin/smoke-container-collector " /tmp/out &&
+	ok "  ...both binaries installed" || bad "  ...both binaries"
+expect 0 "removed" "--uninstall --scan lockfiles,docker removes both" sh /repo/install.sh --uninstall --scan lockfiles,docker
+check "  ...everything gone" sh -c '! [ -e /etc/smoke-collector ] && ! [ -e /usr/local/bin/smoke-collector ] &&
+	! [ -e /usr/local/bin/smoke-container-collector ] && ! id smoke-collector >/dev/null 2>&1 && ! id smoke-container >/dev/null 2>&1'
+
+# At a terminal: the items are asked one by one, then the lockfile paths, the terms (one y) and
+# the two tokens, each prompt naming its program.
+if command -v script >/dev/null; then
+	cmd="sh /tmp/install.sh --url $URL4 --insecure-http $sigflag --no-service --no-run --lang en"
+	(sleep 2; printf '\n'; sleep 1; printf 'y\n'; sleep 1; printf 'y\n'; sleep 1; printf '/srv/billing/current /home/app/shop\n'; sleep 2
+		printf 'y\n'; sleep 3; printf '%s\n' "$TOKEN"; sleep 2; printf '%s\n' "$CTOKEN"; sleep 1) |
+		script -q -c "$cmd" /dev/null >/tmp/out 2>&1
+	cat /tmp/out >>/tmp/all-output
+	if grep -q "Scan OS packages (smoke-collector)? \[Y/n\]" /tmp/out && grep -q "Scan Docker containers" /tmp/out &&
+		grep -q "Lockfile paths for smoke-collector" /tmp/out && grep -q "Scanning: OS packages, application lockfiles, Docker containers" /tmp/out &&
+		grep -q "Asset token for smoke-collector (OS packages and lockfiles) (smk_..., input hidden)" /tmp/out &&
+		grep -q "Container collector token for smoke-container-collector (Docker) (smk_..., input hidden)" /tmp/out &&
+		[ "$(grep -c "Type y to accept" /tmp/out)" = 1 ]; then
+		ok "terminal: items asked one by one, paths asked, one terms prompt, token prompts name their program"
+	else
+		bad "terminal prompts"
+	fi
+	check "  ...config scan=os,lockfiles with both paths, both tokens stored and not echoed" sh -c "grep -qx 'scan=os,lockfiles' /etc/smoke-collector/config &&
+		grep -qx 'lockfile=/home/app/shop' /etc/smoke-collector/config && grep -qx 'token=$TOKEN' /etc/smoke-collector/config &&
+		grep -qx 'token=$CTOKEN' /etc/smoke-collector/containers.config && ! grep -qF -- '$TOKEN' /tmp/out && ! grep -qF -- '$CTOKEN' /tmp/out"
+	check "  ...both records accepted at the prompt" sh -c 'grep -qx "accepted_with=prompt" /etc/smoke-collector/terms-accepted &&
+		grep -qx "accepted_with=prompt" /etc/smoke-collector/containers.terms-accepted'
+	sh /repo/install.sh --uninstall --scan os,docker >/dev/null 2>&1
+else
+	echo "SKIP  no script(1) for the terminal prompt tests"
+fi
+cat /tmp/fakesmoke4.log >>/tmp/all-output
+if grep -qF -- "$CTOKEN" /tmp/all-output; then echo "token printed" >/tmp/out; bad "the container token never appears in any output"; else ok "the container token never appears in any output"; fi
 
 cat /tmp/fakesmoke2.log >>/tmp/all-output
 if grep -qF -- "$TOKEN" /tmp/all-output; then echo "token printed" >/tmp/out; bad "the token never appears in any output (containers)"; else ok "the token never appears in any output (containers)"; fi

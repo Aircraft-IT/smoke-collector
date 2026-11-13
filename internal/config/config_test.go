@@ -185,3 +185,110 @@ func TestTokenPreview(t *testing.T) {
 		t.Errorf("empty = %q", got)
 	}
 }
+
+func TestScanAndLockfiles(t *testing.T) {
+	dir := t.TempDir()
+	base := "url=https://smoke.example.com\ntoken=" + secret + "\n"
+	for _, tc := range []struct {
+		name      string
+		body      string
+		scans     string
+		src       Source
+		lockfiles []string
+		loadErr   string
+		validErr  string
+		ignored   bool
+	}{
+		{name: "default os", body: base, scans: "os"},
+		{name: "os and lockfiles", body: base + "scan = lockfiles, os\nlockfile=/srv/billing/current/\n# c\nlockfile = \"/home/app/my shop\"\n",
+			scans: "os,lockfiles", src: SourceFile, lockfiles: []string{"/srv/billing/current", "/home/app/my shop"}},
+		{name: "lockfiles only", body: base + "scan=lockfiles,lockfiles\nlockfile=/srv/a/yarn.lock\n",
+			scans: "lockfiles", src: SourceFile, lockfiles: []string{"/srv/a/yarn.lock"}},
+		{name: "lockfiles without paths", body: base + "scan=lockfiles\n", scans: "lockfiles", src: SourceFile,
+			validErr: "no lockfile=/path line"},
+		{name: "paths without lockfiles", body: base + "lockfile=/srv/a\n", scans: "os", lockfiles: []string{"/srv/a"}, ignored: true},
+		{name: "docker", body: base + "scan=os,docker\n", loadErr: "smoke-container-collector"},
+		{name: "unknown", body: base + "scan=os,packages\n", loadErr: "unknown item (known: os, lockfiles)"},
+		{name: "singular", body: base + "scan=lockfile\n", loadErr: "did you mean lockfiles"},
+		{name: "empty scan", body: base + "scan=\n", loadErr: "comma-separated"},
+		{name: "empty item", body: base + "scan=os,\n", loadErr: "comma-separated"},
+		{name: "scan twice", body: base + "scan=os\nscan=lockfiles\n", loadErr: "line 4: scan is set twice"},
+		{name: "relative", body: base + "lockfile=srv/a\n", loadErr: "line 3: lockfile must be an absolute path"},
+		{name: "unclean", body: base + "lockfile=/srv/../etc\n", loadErr: "line 3: lockfile must be a clean path"},
+		{name: "empty path", body: base + "lockfile=\n", loadErr: "absolute"},
+		{name: "duplicate", body: base + "lockfile=/srv/a\nlockfile=/srv/a/\n", loadErr: "line 4: lockfile /srv/a is already on line 3"},
+		{name: "too many", body: base + manyLockfiles(21), loadErr: "line 23: at most 20 lockfile lines"},
+		{name: "twenty", body: base + "scan=lockfiles\n" + manyLockfiles(20), scans: "lockfiles", src: SourceFile, lockfiles: lockfilePaths(20)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := write(t, dir, "c", tc.body, 0o640)
+			c, err := Load(p, env(nil))
+			if tc.loadErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.loadErr) {
+					t.Fatalf("Load() = %v, want %q", err, tc.loadErr)
+				}
+				if strings.Contains(err.Error(), secret) {
+					t.Errorf("error contains the token")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.ScanHeader() != tc.scans || c.ScanSource != tc.src || strings.Join(c.Lockfiles, "|") != strings.Join(tc.lockfiles, "|") {
+				t.Errorf("scans=%q (%s) lockfiles=%q", c.ScanHeader(), c.ScanSource, c.Lockfiles)
+			}
+			err = c.Validate()
+			if (err != nil) != (tc.validErr != "") || (err != nil && !strings.Contains(err.Error(), tc.validErr)) {
+				t.Errorf("Validate() = %v, want %q", err, tc.validErr)
+			}
+			if err := c.ValidateScans(); (err != nil) != (tc.validErr != "") {
+				t.Errorf("ValidateScans() = %v", err)
+			}
+			if (c.IgnoredLockfiles() != "") != tc.ignored {
+				t.Errorf("IgnoredLockfiles() = %q", c.IgnoredLockfiles())
+			}
+		})
+	}
+}
+
+func manyLockfiles(n int) string {
+	var b strings.Builder
+	for _, p := range lockfilePaths(n) {
+		b.WriteString("lockfile=" + p + "\n")
+	}
+	return b.String()
+}
+
+func lockfilePaths(n int) []string {
+	var out []string
+	for i := range n {
+		out = append(out, "/srv/app"+strings.Repeat("x", i))
+	}
+	return out
+}
+
+func TestScanKeysOnlyForTheOSCollector(t *testing.T) {
+	dir := t.TempDir()
+	for _, key := range []string{"scan=os", "lockfile=/srv/a"} {
+		p := write(t, dir, "containers.config", "url=https://smoke.example.com\n"+key+"\n", 0o640)
+		if _, err := LoadSpec(ContainerCollector, p, env(nil)); err == nil || !strings.Contains(err.Error(), "unknown key") {
+			t.Errorf("%s in containers.config: %v", key, err)
+		}
+	}
+	c, err := LoadSpec(ContainerCollector, filepath.Join(dir, "missing"), env(nil))
+	if err != nil || c.Scans != nil || c.ValidateScans() != nil {
+		t.Errorf("container collector: scans=%v err=%v", c.Scans, err)
+	}
+}
+
+func TestPermissionErrorIsDetectable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads everything")
+	}
+	p := write(t, t.TempDir(), "config", "url=https://x\n", 0)
+	_, err := Load(p, env(nil))
+	if !errors.Is(err, os.ErrPermission) {
+		t.Errorf("Load() = %v, want a permission error", err)
+	}
+}

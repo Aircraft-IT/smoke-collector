@@ -106,6 +106,20 @@ func TestCreatedAndRequestShape(t *testing.T) {
 	if s.reqs[0].body != body {
 		t.Errorf("gunzipped body = %q", s.reqs[0].body)
 	}
+	if _, set := h["X-Smoke-Collector-Scans"]; set {
+		t.Errorf("X-Smoke-Collector-Scans sent without Scans")
+	}
+}
+
+func TestScansHeader(t *testing.T) {
+	c, s, _ := newClient(t, reply(201, `{"status":"created"}`))
+	c.Scans = "os,lockfiles"
+	if _, err := c.Upload(context.Background(), []byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.reqs[0].header.Get("X-Smoke-Collector-Scans"); got != "os,lockfiles" {
+		t.Errorf("X-Smoke-Collector-Scans = %q", got)
+	}
 }
 
 func TestUnchanged(t *testing.T) {
