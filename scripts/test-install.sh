@@ -17,7 +17,7 @@ trap 'rm -rf "$t"' EXIT
 
 minisign -G -W -f -p "$t/test.pub" -s "$t/test.key" >/dev/null
 DIST_DIR="$t/dist" MINISIGN_SECRET_KEY="$t/test.key" MINISIGN_PUBLIC_KEY="$t/test.pub" \
-	sh scripts/release.sh 0.3.0 --no-image --allow-dirty >"$t/release.log" 2>&1 || { cat "$t/release.log"; exit 1; }
+	sh scripts/release.sh 0.3.1 --no-image --allow-dirty >"$t/release.log" 2>&1 || { cat "$t/release.log"; exit 1; }
 echo "release.sh with a throwaway key: ok ($(find "$t/dist" -type f | wc -l | tr -d ' ') files)"
 CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -o "$t/fakesmoke" ./test/fakesmoke
 printf 'smk_install_test_%s\n' "$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')" >"$t/token"

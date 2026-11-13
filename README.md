@@ -123,7 +123,8 @@ With `os` or `lockfiles` in it, `--scan` replaces `smoke-collector`'s scan list,
 4. asks for the tokens on the terminal with echo off, `smoke-collector`'s first, then the
    container collector's; each prompt names its program. A token is never accepted as a
    command-line argument. For unattended installs use `--token-file FILE` (smoke-collector) and
-   `--containers-token-file FILE`;
+   `--containers-token-file FILE`. A program that is already installed keeps its token and is not
+   asked, unless `--replace-token` is given ([Replacing a token](#replacing-a-token));
 5. creates the `smoke-collector` system user, installs `/usr/local/bin/smoke-collector`, and
    writes `/etc/smoke-collector/config` with mode `0640 root:smoke-collector`, including `scan=`
    and the `lockfile=` lines. With lockfiles it checks, as `smoke-collector`, that each path can
@@ -141,6 +142,7 @@ With `os` or `lockfiles` in it, `--scan` replaces `smoke-collector`'s scan list,
 | `--lockfile PATH` | With `lockfiles`: an absolute directory or lockfile path. Repeatable, at most 20; letters, digits and `. _ - / @ +` only (edit the configuration by hand for others). The paths given replace the configured ones; `--lockfile none` clears them. Without it, an upgrade keeps the configured paths. With `lockfiles` and no path at all, `install.sh` asks at the terminal, or stops without one. |
 | `--token-file FILE` | Read `smoke-collector`'s token from FILE (with only `docker` chosen: the container collector's). Without it, a reinstall or upgrade keeps the existing token. |
 | `--containers-token-file FILE` | Read the container collector's token from FILE. |
+| `--replace-token` | (0.3.1+) Replace the token of each program this run installs that already has one: ask for the new token at the terminal (or read it from the token file). Smoke revokes the program's older token on this host after the new one's first successful report. |
 | `--containers` | The same as `--scan docker`. |
 | `--docker-host unix:///PATH` | With `docker`: see [Narrowing Docker access further](#narrowing-docker-access-further). |
 | `--version X.Y.Z` | Install that version instead of `LATEST`. |
@@ -173,6 +175,18 @@ With [minisign](https://jedisct1.github.io/minisign/) and the public key from
 minisign -Vm SHA256SUMS -P <public key>
 sha256sum -c --ignore-missing SHA256SUMS
 ```
+
+### Replacing a token
+
+To give a host a new token (the old one leaked, is about to expire, or the host was rebuilt),
+choose **Install collector** on the host page again and tick **Replace token**: Smoke creates a
+new token for each program and adds `--replace-token` to the command, so `install.sh` asks for
+the new token even though one is configured. Without the tick, the command keeps the host's token
+and Smoke creates none (`--replace-token` needs 0.3.1; with an older `install.sh`, edit the
+configuration by hand as below). After the new token's first successful report, Smoke revokes the
+program's older collector tokens of that host (audited as `api_token.revoked`); tokens created
+later than the one reporting, and `smoke-collector`'s tokens renamed by hand, are left alone.
+By hand: edit `token=` in `/etc/smoke-collector/config` (or `containers.config`) with `sudoedit`.
 
 ## Commands
 
