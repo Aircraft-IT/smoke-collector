@@ -83,6 +83,13 @@ curl -fsSL https://smoke.example.com/downloads/collector/install.sh | sudo sh -s
 
 `install.sh` (POSIX sh) then:
 
+0. shows the installation terms (what it installs, what it collects and sends, your
+   responsibilities, the disclaimer) and continues only when you type `y`; anything else leaves
+   the host unchanged. The language follows `--lang zh-TW|en` (the asset page adds `--lang zh-TW`
+   in Chinese), otherwise `LANG`. The acceptance (version, time, how, `SUDO_USER`) is written to
+   `/etc/smoke-collector/terms-accepted`, and an upgrade asks again only when `TERMS_VERSION` in
+   `install.sh` changes. Without a terminal, read them with `--show-terms` and accept with
+   `--accept-terms`;
 1. downloads `LATEST`, the binary for the host architecture (`amd64` or `arm64`), `SHA256SUMS`
    and `SHA256SUMS.minisig`;
 2. verifies the minisign signature of `SHA256SUMS` with `openssl` (OpenSSL 3; Alpine:
@@ -105,7 +112,10 @@ curl -fsSL https://smoke.example.com/downloads/collector/install.sh | sudo sh -s
 | `--skip-signature` | Skip the signature check. The SHA-256 is still checked. Not recommended. |
 | `--no-service` | Do not install the timer or cron entry. |
 | `--no-run` | Do not run the collector at the end. |
-| `--uninstall` | Remove the binary, the configuration, the timer or cron entry, and the user. |
+| `--show-terms` | Print the installation terms and exit (no root needed; with `--containers`, the container collector's). |
+| `--accept-terms` | Accept the installation terms without being asked (unattended installs). `--yes` is the same. |
+| `--lang zh-TW\|en` | Language of the terms (default: from `LANG`, otherwise English). |
+| `--uninstall` | Remove the binary, the configuration, the timer or cron entry, the terms record and the user. |
 | `--verify-signature FILE SIG` | Only verify FILE against SIG with the embedded key (no root needed). |
 | `--insecure-http` | Allow `http://localhost` (testing only). |
 
@@ -273,8 +283,10 @@ install it.
 curl -fsSL https://<smoke>/downloads/collector/install.sh | sudo sh -s -- --url https://<smoke> --containers
 ```
 
-It asks you to confirm the docker group (non-interactive: `--yes`; to use a filtering proxy
-socket instead of the docker group, see `--docker-host` below) and for the token created
+Its installation terms state the docker group privilege, and you accept them by typing `y`
+(unattended: `--accept-terms`, or `--yes`; recorded in
+`/etc/smoke-collector/containers.terms-accepted`; to use a filtering proxy socket instead of the
+docker group, see `--docker-host` below). It then asks for the token created
 with "Install container collector" on the host page (scope `containers:write`; it cannot write
 the host's OS inventory). It creates the `smoke-container` user in the `docker` group,
 `/usr/local/bin/smoke-container-collector`, `/etc/smoke-collector/containers.config` (0640
