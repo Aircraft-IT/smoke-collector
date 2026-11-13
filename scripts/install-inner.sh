@@ -99,6 +99,11 @@ expect 0 "report unchanged" "smoke-collector run again: 200 unchanged" runas "/u
 expect 0 "keeping the token" "re-running install.sh keeps the existing token (no prompt)" pipe_install $sigflag --no-service
 grep -q "report unchanged" /tmp/out && ok "  ...and the run reports unchanged" || bad "  ...run output"
 grep -q "already accepted on this host" /tmp/out && ok "  ...and the accepted terms are not asked again" || bad "  ...terms asked again"
+# --replace-token: the existing token is not kept, so without a terminal or token file it stops
+# before anything changes.
+expect 1 "no terminal to read the smoke-collector token" "--replace-token asks for a new token even when one is set" \
+	pipe_install --replace-token $sigflag --no-service
+check "  ...and the configured token is unchanged" grep -qx "token=$TOKEN" /etc/smoke-collector/config
 
 # Wrong token: the install completes but the first run is rejected (exit 3, 401).
 expect 3 "HTTP 401 UNAUTHENTICATED" "a wrong token gives exit 3 with the server's code" \
@@ -198,6 +203,8 @@ expect 1 "ermission denied" "smoke-collector cannot read the container collector
 expect 0 "status:        ok" "smoke-collector print-config still works" runas "/usr/local/bin/smoke-collector print-config --insecure-http"
 expect 0 "already accepted on this host" "re-running --containers (upgrade) needs no confirmation and keeps the token" pipe_c $sigflag --no-run
 grep -q "keeping the token" /tmp/out && ok "  ...token kept" || bad "  ...token not kept"
+expect 1 "no terminal to read the smoke-container-collector token" "--replace-token asks for the container collector's new token" \
+	pipe_c --replace-token $sigflag --no-run
 
 expect 0 "removed" "--uninstall --containers" sh /repo/install.sh --uninstall --containers
 check "container collector gone, OS collector kept, dir back to 0750" sh -c '! [ -e /usr/local/bin/smoke-container-collector ] &&

@@ -47,6 +47,10 @@
 #                        Without it, an existing installation keeps its token.
 #   --containers-token-file FILE
 #                        read the container collector's token from FILE.
+#   --replace-token      replace the token of each program this run installs that already has
+#                        one: ask for the new token at the terminal (or read it from the token
+#                        file). Smoke revokes the old token after the new one's first report.
+#                        (0.3.1+)
 #   --containers         the same as --scan docker (with --uninstall: the container collector).
 #   --version VERSION    install VERSION instead of the one in LATEST.
 #   --skip-signature     do not verify the signature (not recommended; SHA-256 is still checked).
@@ -96,6 +100,7 @@ MAX_LOCKFILES=20
 URL=""
 TOKEN_FILE=""
 C_TOKEN_FILE=""
+REPLACE_TOKEN=0
 VERSION=""
 SKIP_SIGNATURE=0
 NO_SERVICE=0
@@ -141,7 +146,8 @@ usage() {
 		sed -n '2,/^set -eu/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'
 	else
 		echo "Options: --url URL [--scan os,lockfiles,docker] [--lockfile PATH|none]... [--token-file FILE]"
-		echo "         [--containers-token-file FILE] [--version VERSION] [--skip-signature] [--no-service]"
+		echo "         [--containers-token-file FILE] [--replace-token] [--version VERSION] [--skip-signature]"
+		echo "         [--no-service]"
 		echo "         [--no-run] [--insecure-http] [--accept-terms] [--lang zh-TW|en]"
 		echo "         [--containers] [--docker-host unix:///PATH]"
 		echo "         | --show-terms [--scan LIST] [--lang zh-TW|en]"
@@ -204,6 +210,7 @@ while [ $# -gt 0 ]; do
 	--token-file=*) TOKEN_FILE=${1#*=}; shift ;;
 	--containers-token-file) need_value "$@"; C_TOKEN_FILE=$2; shift 2 ;;
 	--containers-token-file=*) C_TOKEN_FILE=${1#*=}; shift ;;
+	--replace-token) REPLACE_TOKEN=1; shift ;;
 	--version) need_value "$@"; VERSION=$2; shift 2 ;;
 	--version=*) VERSION=${1#*=}; shift ;;
 	--skip-signature) SKIP_SIGNATURE=1; shift ;;
@@ -1215,14 +1222,16 @@ done
 
 # --- 4. tokens (smoke-collector's first) --------------------------------------------------------
 
-# read_token FILE PROMPT OPTION: sets TOKEN, or KEEP_TOKEN=1 to keep the one in $CONF.
+# read_token FILE PROMPT OPTION: sets TOKEN, or KEEP_TOKEN=1 to keep the one in $CONF (not with
+# --replace-token).
 read_token() {
 	TOKEN="" KEEP_TOKEN=0
 	if [ -n "$1" ]; then
 		TOKEN=$(sed -n 1p "$1" | tr -d '\r')
-	elif [ -f "$CONF" ] && grep -Eq '^[[:space:]]*(token|token_file)[[:space:]]*=' "$CONF"; then
+	elif [ "$REPLACE_TOKEN" = 0 ] && [ -f "$CONF" ] &&
+		grep -Eq '^[[:space:]]*(token|token_file)[[:space:]]*=' "$CONF"; then
 		KEEP_TOKEN=1
-		say "keeping the token of the existing $PROG installation (use $3 to replace it)"
+		say "keeping the token of the existing $PROG installation (use --replace-token or $3 to replace it)"
 		return 0
 	else
 		has_tty || die "no terminal to read the $PROG token from; use $3 FILE"
