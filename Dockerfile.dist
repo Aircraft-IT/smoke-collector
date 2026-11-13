@@ -1,7 +1,9 @@
 # smoke-collector download tree (OS detection plan §5.4), built by scripts/release.sh from
 # dist/ (the build context). /dist holds exactly what nginx serves under /downloads/collector/:
 #   /dist/install.sh  /dist/LATEST  /dist/smoke-collector.pub
-#   /dist/v<version>/smoke-collector_linux_amd64  smoke-collector_linux_arm64  SHA256SUMS  SHA256SUMS.minisig
+#   /dist/v<version>/smoke-collector_linux_amd64  smoke-collector_linux_arm64
+#                    smoke-container-collector_linux_amd64  smoke-container-collector_linux_arm64
+#                    SHA256SUMS  SHA256SUMS.minisig
 # The App VM's one-shot collector-dist service copies it into the volume nginx reads:
 #   collector-dist:
 #     image: ${SMOKE_REGISTRY}/smoke/smoke-collector/dist:${SMOKE_COLLECTOR_TAG}

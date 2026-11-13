@@ -4,7 +4,8 @@
 #
 #   scripts/release.sh <version> [--no-image] [--no-push] [--allow-dirty]
 #
-# 1. builds smoke-collector_linux_amd64 and _arm64 (CGO_ENABLED=0, version stamped in);
+# 1. builds smoke-collector and smoke-container-collector for linux amd64 and arm64
+#    (CGO_ENABLED=0, version stamped in);
 # 2. writes SHA256SUMS and signs it with `minisign -S -l` (legacy: a plain Ed25519 signature
 #    over the file, which install.sh verifies with openssl); minisign asks for the key password;
 # 3. writes install.sh with the public key embedded, LATEST and smoke-collector.pub;
@@ -13,7 +14,8 @@
 #
 # The download tree is left in $DIST_DIR (default ./dist), laid out like /downloads/collector/:
 #   install.sh  LATEST  smoke-collector.pub  v<version>/{smoke-collector_linux_amd64,
-#   smoke-collector_linux_arm64, SHA256SUMS, SHA256SUMS.minisig}
+#   smoke-collector_linux_arm64, smoke-container-collector_linux_amd64,
+#   smoke-container-collector_linux_arm64, SHA256SUMS, SHA256SUMS.minisig}
 #
 # Environment:
 #   MINISIGN_SECRET_KEY  default ~/.minisign/smoke-collector.key
@@ -67,12 +69,15 @@ rm -rf "$DIST"
 mkdir -p "$rel"
 
 echo "release: building $VERSION"
-for arch in amd64 arm64; do
-	CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
-		-ldflags "-s -w -X gitlab.aircraft.tw/smoke/smoke-collector/internal/version.Version=$VERSION" \
-		-o "$rel/smoke-collector_linux_$arch" ./cmd/smoke-collector
+for prog in smoke-collector smoke-container-collector; do
+	for arch in amd64 arm64; do
+		CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
+			-ldflags "-s -w -X gitlab.aircraft.tw/smoke/smoke-collector/internal/version.Version=$VERSION" \
+			-o "$rel/${prog}_linux_$arch" "./cmd/$prog"
+	done
 done
-(cd "$rel" && sha smoke-collector_linux_amd64 smoke-collector_linux_arm64 >SHA256SUMS)
+(cd "$rel" && sha smoke-collector_linux_amd64 smoke-collector_linux_arm64 \
+	smoke-container-collector_linux_amd64 smoke-container-collector_linux_arm64 >SHA256SUMS)
 
 echo "release: signing SHA256SUMS (minisign -S -l)"
 minisign -S -l -s "$SECRET" -m "$rel/SHA256SUMS" -x "$rel/SHA256SUMS.minisig" \
@@ -83,7 +88,7 @@ minisign -V -q -p "$PUBLIC" -m "$rel/SHA256SUMS" -x "$rel/SHA256SUMS.minisig" ||
 sh scripts/embed-pubkey.sh install.sh "$PUBLIC" "$DIST/install.sh"
 cp "$PUBLIC" "$DIST/smoke-collector.pub"
 printf '%s\n' "$VERSION" >"$DIST/LATEST"
-chmod 0755 "$rel"/smoke-collector_linux_*
+chmod 0755 "$rel"/smoke-collector_linux_* "$rel"/smoke-container-collector_linux_*
 chmod 0644 "$DIST/install.sh" "$DIST/LATEST" "$DIST/smoke-collector.pub" "$rel/SHA256SUMS" "$rel/SHA256SUMS.minisig"
 
 # The same check install.sh makes on the host (needs OpenSSL 3 here; macOS: brew install openssl).
