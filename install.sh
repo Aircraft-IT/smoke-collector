@@ -10,6 +10,11 @@
 # /etc/smoke-collector/config, schedules a daily run (systemd timer, or cron without systemd)
 # and runs the collector once.
 #
+# With --containers it installs the container collector instead (spec FR-COL-08):
+# /usr/local/bin/smoke-container-collector, run daily as the smoke-container user, which is added
+# to the docker group (equivalent to root; you are asked to confirm), configured in
+# /etc/smoke-collector/containers.config with its own token. The OS collector is not touched.
+#
 # Options:
 #   --url URL            Smoke address (https://). Required unless --uninstall.
 #   --token-file FILE    read the asset token from FILE instead of the terminal (non-interactive).
@@ -19,6 +24,13 @@
 #   --no-service         do not install the systemd timer or cron entry.
 #   --no-run             do not run the collector at the end.
 #   --insecure-http      allow an http:// URL for localhost (testing only).
+#   --containers         install (or with --uninstall remove) the container collector.
+#   --yes                with --containers: confirm the docker group without being asked.
+#   --docker-host unix:///PATH
+#                        with --containers: read Docker through this socket (for example a
+#                        filtering proxy that allows only the collector's four GET paths) instead
+#                        of /var/run/docker.sock. The user is then NOT added to the docker group:
+#                        give it access to that socket yourself (for example its group).
 #   --uninstall          remove the program, its configuration, the timer or cron entry and the user.
 #   --verify-signature FILE SIGFILE
 #                        only verify FILE against the minisign signature SIGFILE with the embedded
@@ -48,6 +60,9 @@ NO_SERVICE=0
 NO_RUN=0
 INSECURE_HTTP=0
 UNINSTALL=0
+CONTAINERS=0
+YES=0
+DOCKER_HOST_OPT=""
 VERIFY_FILE=""
 VERIFY_SIG=""
 WORK=""
@@ -78,7 +93,9 @@ usage() {
 		sed -n '2,/^set -eu/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'
 	else
 		echo "Options: --url URL [--token-file FILE] [--version VERSION] [--skip-signature] [--no-service]"
-		echo "         [--no-run] [--insecure-http] | --uninstall | --verify-signature FILE SIGFILE"
+		echo "         [--no-run] [--insecure-http] [--containers [--yes] [--docker-host unix:///PATH]]"
+		echo "         | --uninstall [--containers]"
+		echo "         | --verify-signature FILE SIGFILE"
 	fi
 }
 
@@ -99,6 +116,10 @@ while [ $# -gt 0 ]; do
 	--no-run) NO_RUN=1; shift ;;
 	--insecure-http) INSECURE_HTTP=1; shift ;;
 	--uninstall) UNINSTALL=1; shift ;;
+	--containers) CONTAINERS=1; shift ;;
+	--yes) YES=1; shift ;;
+	--docker-host) need_value "$@"; DOCKER_HOST_OPT=$2; shift 2 ;;
+	--docker-host=*) DOCKER_HOST_OPT=${1#*=}; shift ;;
 	--verify-signature)
 		[ $# -ge 3 ] || die "--verify-signature needs FILE and SIGFILE"
 		VERIFY_FILE=$2; VERIFY_SIG=$3; shift 3 ;;
@@ -108,6 +129,31 @@ while [ $# -gt 0 ]; do
 	*) die "unknown option: $1 (see --help)" ;;
 	esac
 done
+
+# The program this run installs or removes: the OS collector, or with --containers the container
+# collector (its own user, binary, configuration file, units and cron entry).
+PROG=smoke-collector
+if [ "$CONTAINERS" = 1 ]; then
+	PROG=smoke-container-collector
+	NAME=smoke-container
+	BIN=/usr/local/bin/smoke-container-collector
+	CONF=$CONF_DIR/containers.config
+	CRON_D=/etc/cron.d/smoke-container-collector
+	CRONTAB=/etc/crontabs/smoke-container
+fi
+OS_CONF=$CONF_DIR/config
+CONTAINERS_CONF=$CONF_DIR/containers.config
+DEFAULT_DOCKER_HOST=unix:///var/run/docker.sock
+if [ -n "$DOCKER_HOST_OPT" ]; then
+	[ "$CONTAINERS" = 1 ] || die "--docker-host is only for --containers"
+	case $DOCKER_HOST_OPT in
+	unix:///?*) ;;
+	*) die "--docker-host must look like unix:///run/smoke-docker.sock (only unix sockets)" ;;
+	esac
+	case ${DOCKER_HOST_OPT#unix://} in
+	*[!A-Za-z0-9._/-]* | *..* | *//*) die "--docker-host must be unix:// followed by a clean absolute path (letters, digits, . _ - /)" ;;
+	esac
+fi
 
 # --- signature (minisign legacy = Ed25519 over the file) -------------------------------------
 
@@ -179,10 +225,10 @@ user_group() { id -gn "$NAME" 2>/dev/null || echo "$NAME"; }
 # --- uninstall ----------------------------------------------------------------------------------
 
 uninstall() {
-	if have systemctl && [ -f "$UNIT_DIR/smoke-collector.timer" ]; then
-		systemctl disable --now smoke-collector.timer >/dev/null 2>&1 || true
+	if have systemctl && [ -f "$UNIT_DIR/$PROG.timer" ]; then
+		systemctl disable --now "$PROG.timer" >/dev/null 2>&1 || true
 	fi
-	rm -f "$UNIT_DIR/smoke-collector.timer" "$UNIT_DIR/smoke-collector.service"
+	rm -f "$UNIT_DIR/$PROG.timer" "$UNIT_DIR/$PROG.service"
 	if has_systemd; then
 		systemctl daemon-reload >/dev/null 2>&1 || true
 	fi
@@ -191,7 +237,22 @@ uninstall() {
 		echo "$NAME" >>/etc/crontabs/cron.update 2>/dev/null || true
 	fi
 	rm -f "$CRON_D" "$BIN"
-	rm -rf "$CONF_DIR"
+	# /etc/smoke-collector is shared: each collector removes only its own file while the other
+	# one is installed.
+	if [ "$CONTAINERS" = 1 ]; then
+		rm -f "$CONF"
+		if [ -f "$OS_CONF" ]; then
+			chmod 0750 "$CONF_DIR"
+		else
+			rmdir "$CONF_DIR" 2>/dev/null || true
+		fi
+	elif [ -f "$CONTAINERS_CONF" ]; then
+		find "$CONF_DIR" -mindepth 1 -maxdepth 1 ! -name containers.config -exec rm -rf {} \;
+		chown root:root "$CONF_DIR" 2>/dev/null || chown 0:0 "$CONF_DIR"
+		chmod 0751 "$CONF_DIR"
+	else
+		rm -rf "$CONF_DIR"
+	fi
 	if id "$NAME" >/dev/null 2>&1; then
 		if have userdel; then
 			userdel "$NAME" >/dev/null 2>&1 || warn "could not remove the user $NAME"
@@ -202,7 +263,7 @@ uninstall() {
 	if have getent && getent group "$NAME" >/dev/null 2>&1; then
 		if have groupdel; then groupdel "$NAME" >/dev/null 2>&1 || true; elif have delgroup; then delgroup "$NAME" >/dev/null 2>&1 || true; fi
 	fi
-	say "removed $BIN, $CONF_DIR, the timer or cron entry and the $NAME user"
+	say "removed $BIN, $CONF, the timer or cron entry and the $NAME user"
 }
 
 if [ "$UNINSTALL" = 1 ]; then
@@ -224,6 +285,77 @@ esac
 
 if [ -n "$VERSION" ]; then
 	VERSION=${VERSION#v}
+fi
+
+in_group() { id -nG "$1" 2>/dev/null | tr ' ' '\n' | grep -qx "$2"; }
+
+# An upgrade without --docker-host keeps the socket of the existing configuration.
+if [ "$CONTAINERS" = 1 ] && [ -z "$DOCKER_HOST_OPT" ] && [ -f "$CONF" ]; then
+	DOCKER_HOST_OPT=$(sed -n 's/^[[:space:]]*docker_host[[:space:]]*=[[:space:]]*//p' "$CONF" | sed -n 1p | tr -d " \t\r\"'")
+	case ${DOCKER_HOST_OPT#unix://} in
+	"$DOCKER_HOST_OPT" | *[!A-Za-z0-9._/-]* | *..*) DOCKER_HOST_OPT="" ;;
+	esac
+	if [ -n "$DOCKER_HOST_OPT" ]; then say "keeping docker_host=$DOCKER_HOST_OPT of the existing installation"; fi
+fi
+if [ "$DOCKER_HOST_OPT" = "$DEFAULT_DOCKER_HOST" ]; then
+	DOCKER_HOST_OPT=""
+fi
+# USE_DOCKER_GROUP: the default socket through the docker group; otherwise the given socket.
+USE_DOCKER_GROUP=0
+if [ "$CONTAINERS" = 1 ] && [ -z "$DOCKER_HOST_OPT" ]; then
+	USE_DOCKER_GROUP=1
+fi
+
+if [ "$CONTAINERS" = 1 ] && [ "$USE_DOCKER_GROUP" = 0 ]; then
+	if [ "$YES" = 1 ]; then
+		say "--yes: $NAME will read Docker through $DOCKER_HOST_OPT (not added to the docker group)"
+	elif [ -f "$CONF" ] && grep -Eq "^[[:space:]]*docker_host[[:space:]]*=[[:space:]]*${DOCKER_HOST_OPT}[[:space:]]*\$" "$CONF"; then
+		say "$NAME already reads Docker through $DOCKER_HOST_OPT"
+	else
+		if ! (: </dev/tty) 2>/dev/null; then
+			die "no terminal to confirm; read the README and pass --yes"
+		fi
+		{
+			echo "The container collector runs as the $NAME user and reads Docker through $DOCKER_HOST_OPT."
+			echo "It is not added to the docker group: give $NAME access to that socket yourself (for"
+			echo "example the proxy socket's group). Whatever that socket allows, the account can do."
+			echo "The program only sends GET requests to four Docker API paths (no exec, no pulls) and"
+			echo "reads os-release and the package database of one container per image."
+			printf 'Continue? [y/N] '
+		} >/dev/tty
+		IFS= read -r answer </dev/tty || answer=""
+		case $answer in
+		y | Y | yes | YES) ;;
+		*) die "not confirmed; nothing installed" ;;
+		esac
+	fi
+elif [ "$CONTAINERS" = 1 ]; then
+	if have getent; then
+		getent group docker >/dev/null 2>&1 || die "there is no docker group on this host (is Docker installed?); the container collector reads Docker through it (or use --docker-host with a proxy socket)"
+	else
+		grep -q '^docker:' /etc/group || die "there is no docker group on this host (is Docker installed?); the container collector reads Docker through it (or use --docker-host with a proxy socket)"
+	fi
+	if in_group "$NAME" docker; then
+		say "$NAME is already in the docker group"
+	elif [ "$YES" = 1 ]; then
+		say "--yes: $NAME will be added to the docker group (equivalent to root)"
+	else
+		if ! (: </dev/tty) 2>/dev/null; then
+			die "no terminal to confirm the docker group; read the README and pass --yes"
+		fi
+		{
+			echo "The container collector runs as the $NAME user, which will be added to the docker group."
+			echo "This account can control Docker, which is equivalent to root on this host."
+			echo "The program only sends GET requests to four Docker API paths (no exec, no pulls) and"
+			echo "reads os-release and the package database of one container per image."
+			printf 'Continue? [y/N] '
+		} >/dev/tty
+		IFS= read -r answer </dev/tty || answer=""
+		case $answer in
+		y | Y | yes | YES) ;;
+		*) die "not confirmed; nothing installed" ;;
+		esac
+	fi
 fi
 
 if [ "$SKIP_SIGNATURE" = 0 ]; then
@@ -264,8 +396,8 @@ if [ -z "$VERSION" ]; then
 fi
 printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' ||
 	die "invalid version: $VERSION"
-FILE="smoke-collector_linux_$ARCH"
-say "downloading smoke-collector $VERSION ($ARCH)"
+FILE="${PROG}_linux_$ARCH"
+say "downloading $PROG $VERSION ($ARCH)"
 for f in "$FILE" SHA256SUMS SHA256SUMS.minisig; do
 	fetch "$BASE/v$VERSION/$f" "$WORK/$f" || die "cannot download $BASE/v$VERSION/$f"
 done
@@ -302,7 +434,11 @@ else
 		die "no terminal to read the token from; use --token-file FILE"
 	fi
 	STTY_SAVED=$(stty -g </dev/tty)
-	printf 'Asset token (smk_..., input hidden): ' >/dev/tty
+	if [ "$CONTAINERS" = 1 ]; then
+		printf 'Container collector token (smk_..., input hidden): ' >/dev/tty
+	else
+		printf 'Asset token (smk_..., input hidden): ' >/dev/tty
+	fi
 	stty -echo </dev/tty
 	IFS= read -r TOKEN </dev/tty || true
 	stty "$STTY_SAVED" </dev/tty
@@ -336,6 +472,27 @@ if ! id "$NAME" >/dev/null 2>&1; then
 	say "created system user $NAME"
 fi
 GROUP=$(user_group)
+if [ "$CONTAINERS" = 1 ] && [ "$USE_DOCKER_GROUP" = 0 ] && in_group "$NAME" docker; then
+	# Switching to a proxy socket: the docker group is no longer needed.
+	if have gpasswd; then
+		gpasswd -d "$NAME" docker >/dev/null
+	elif have delgroup; then
+		delgroup "$NAME" docker >/dev/null
+	else
+		warn "could not remove $NAME from the docker group; remove it yourself"
+	fi
+	in_group "$NAME" docker || say "removed $NAME from the docker group (it reads Docker through $DOCKER_HOST_OPT)"
+fi
+if [ "$USE_DOCKER_GROUP" = 1 ] && ! in_group "$NAME" docker; then
+	if have usermod; then
+		usermod -aG docker "$NAME"
+	elif have addgroup; then
+		addgroup "$NAME" docker
+	else
+		die "cannot add $NAME to the docker group (no usermod or addgroup)"
+	fi
+	say "added $NAME to the docker group"
+fi
 
 mkdir -p "$(dirname "$BIN")"
 cp "$WORK/$FILE" "$BIN.new"
@@ -344,20 +501,39 @@ chmod 0755 "$BIN.new"
 mv -f "$BIN.new" "$BIN"
 say "installed $BIN ($("$BIN" version))"
 
+# /etc/smoke-collector is shared by both collectors. With only the OS collector it stays
+# 0750 root:smoke-collector; with containers.config in it, others get search (x) permission so
+# smoke-container can open its own file (each file is 0640 and owned by its group).
 mkdir -p "$CONF_DIR"
-chown "root:$GROUP" "$CONF_DIR"
-chmod 0750 "$CONF_DIR"
+if [ "$CONTAINERS" = 1 ]; then
+	if ! [ -f "$OS_CONF" ]; then
+		chown root:root "$CONF_DIR" 2>/dev/null || chown 0:0 "$CONF_DIR"
+	fi
+	chmod 0751 "$CONF_DIR"
+else
+	chown "root:$GROUP" "$CONF_DIR"
+	if [ -f "$CONTAINERS_CONF" ]; then chmod 0751 "$CONF_DIR"; else chmod 0750 "$CONF_DIR"; fi
+fi
 tmp="$CONF_DIR/.config.$$"
 (
 	umask 077
 	{
-		echo "# smoke-collector configuration, written by install.sh. Mode 0640 root:$GROUP."
-		echo "# Keys: url, token (or token_file). SMOKE_COLLECTOR_URL / SMOKE_COLLECTOR_TOKEN override."
+		if [ "$CONTAINERS" = 1 ]; then
+			echo "# smoke-container-collector configuration, written by install.sh. Mode 0640 root:$GROUP."
+			echo "# Keys: url, token (or token_file), docker_host (default unix:///var/run/docker.sock)."
+			echo "# SMOKE_CONTAINER_COLLECTOR_URL / _TOKEN / _DOCKER_HOST override."
+		else
+			echo "# smoke-collector configuration, written by install.sh. Mode 0640 root:$GROUP."
+			echo "# Keys: url, token (or token_file). SMOKE_COLLECTOR_URL / SMOKE_COLLECTOR_TOKEN override."
+		fi
 		printf 'url=%s\n' "$URL"
 		if [ "$KEEP_TOKEN" = 1 ]; then
 			grep -E '^[[:space:]]*(token|token_file)[[:space:]]*=' "$CONF"
 		else
 			printf 'token=%s\n' "$TOKEN"
+		fi
+		if [ -n "$DOCKER_HOST_OPT" ]; then
+			printf 'docker_host=%s\n' "$DOCKER_HOST_OPT"
 		fi
 	} >"$tmp"
 )
@@ -370,6 +546,10 @@ say "wrote $CONF (0640 root:$GROUP)"
 # --- 6. schedule --------------------------------------------------------------------------------
 
 install_systemd() {
+	if [ "$CONTAINERS" = 1 ]; then
+		install_container_units
+		return
+	fi
 	cat >"$UNIT_DIR/smoke-collector.service" <<'SERVICE'
 [Unit]
 Description=Smoke collector: upload the OS package inventory to Smoke
@@ -424,13 +604,77 @@ TIMER
 	say "installed systemd smoke-collector.timer (daily, randomized by up to 4 h)"
 }
 
+install_container_units() {
+	cat >"$UNIT_DIR/smoke-container-collector.service" <<'CONTAINER_SERVICE'
+[Unit]
+Description=Smoke container collector: report running Docker images and their packages to Smoke
+Documentation=https://gitlab.aircraft.tw/smoke/smoke-collector
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+User=smoke-container
+Group=smoke-container
+# The docker group can control Docker, which is equivalent to root (install.sh --containers asks
+# before adding it). The program only sends GET requests to four Docker API paths.
+SupplementaryGroups=docker
+ExecStart=/usr/local/bin/smoke-container-collector run
+TimeoutStartSec=15min
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+CONTAINER_SERVICE
+	cat >"$UNIT_DIR/smoke-container-collector.timer" <<'CONTAINER_TIMER'
+[Unit]
+Description=Daily Smoke container collector run
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=4h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+CONTAINER_TIMER
+	if [ "$USE_DOCKER_GROUP" = 0 ]; then
+		# A proxy socket: no docker group (the comment above SupplementaryGroups goes with it).
+		awk '/^# The docker group can control Docker/ { skip = 1 } !skip { print } /^SupplementaryGroups=docker$/ { skip = 0 }' \
+			"$UNIT_DIR/smoke-container-collector.service" >"$UNIT_DIR/.smoke-container-collector.service.$$"
+		mv -f "$UNIT_DIR/.smoke-container-collector.service.$$" "$UNIT_DIR/smoke-container-collector.service"
+	fi
+	chmod 0644 "$UNIT_DIR/smoke-container-collector.service" "$UNIT_DIR/smoke-container-collector.timer"
+	systemctl daemon-reload
+	systemctl enable --now smoke-container-collector.timer >/dev/null 2>&1 || die "systemctl enable --now smoke-container-collector.timer failed"
+	say "installed systemd smoke-container-collector.timer (daily, randomized by up to 4 h)"
+}
+
 install_cron() {
 	# A random time of day, like RandomizedDelaySec, so hosts do not all report at once.
 	when=$(awk 'BEGIN { srand(); printf "%d %d", int(rand() * 60), int(rand() * 24) }')
-	if have logger; then sink='2>&1 | logger -t smoke-collector'; else sink='>/dev/null 2>&1'; fi
+	if have logger; then sink="2>&1 | logger -t $PROG"; else sink='>/dev/null 2>&1'; fi
 	if [ -d /etc/cron.d ]; then
 		{
-			echo "# smoke-collector daily run, written by install.sh"
+			echo "# $PROG daily run, written by install.sh"
 			echo "SHELL=/bin/sh"
 			echo "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
 			echo "$when * * * $NAME $BIN run $sink"
@@ -440,7 +684,7 @@ install_cron() {
 	elif [ -d /etc/crontabs ] || have crond; then
 		mkdir -p /etc/crontabs
 		{
-			echo "# smoke-collector daily run, written by install.sh"
+			echo "# $PROG daily run, written by install.sh"
 			echo "$when * * * $BIN run $sink"
 		} >"$CRONTAB"
 		chmod 0600 "$CRONTAB"
@@ -471,7 +715,7 @@ if [ "$NO_RUN" = 1 ]; then
 fi
 set -- run
 if [ "$INSECURE_HTTP" = 1 ]; then set -- run --insecure-http; fi
-say "running the collector once as $NAME"
+say "running $PROG once as $NAME"
 set +e
 if have runuser; then
 	runuser -u "$NAME" -- "$BIN" "$@"
@@ -483,8 +727,18 @@ rc=$?
 set -e
 case $rc in
 0) say "done: the first report was accepted" ;;
-1) warn "first run: configuration error (check $CONF; smoke-collector print-config)" ;;
-2) warn "first run: collecting the package list failed" ;;
+1) warn "first run: configuration error (check $CONF; $PROG print-config)" ;;
+2)
+	if [ "$CONTAINERS" = 1 ]; then
+		if [ "$USE_DOCKER_GROUP" = 1 ]; then
+			warn "first run: reading Docker failed (is Docker running? is $NAME in the docker group?)"
+		else
+			warn "first run: reading Docker failed (can $NAME open ${DOCKER_HOST_OPT#unix://}?)"
+		fi
+	else
+		warn "first run: collecting the package list failed"
+	fi
+	;;
 3) warn "first run: Smoke rejected the report (see the message above)" ;;
 4) warn "first run: network or server error; the timer will try again" ;;
 *) warn "first run failed (exit code $rc)" ;;

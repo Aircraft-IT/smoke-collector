@@ -431,3 +431,19 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 	}
 	return c.Buffer.Write(p)
 }
+
+// OSReleaseLines returns what `grep -E "^(ID|VERSION_ID[|VERSION_CODENAME])=" /etc/os-release`
+// prints for the package manager mgr (the #os-release section of plan §2.1, §2.2). The container
+// collector builds the same section from a container's os-release.
+func OSReleaseLines(osRelease []byte, mgr Manager) []byte {
+	var b bytes.Buffer
+	if mgr == Apk {
+		grepLines(&b, osRelease, apkOSRelease)
+	} else {
+		grepLines(&b, osRelease, debOSRelease)
+	}
+	return b.Bytes()
+}
+
+// OSID is the unquoted ID of an os-release file ("" when it has none).
+func OSID(osRelease []byte) string { return osID(osRelease) }

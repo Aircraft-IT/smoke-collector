@@ -25,7 +25,9 @@ printf 'smk_wrong_token_%s\n' "$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')" >
 chmod -R a+rX "$t"
 
 fail=0
-for spec in buildpack-deps:noble-curl:deb buildpack-deps:bookworm-curl:deb alpine:3.21:apk; do
+# INSTALL_TEST_IMAGES overrides the list ("image:tag:deb image:tag:apk"; images that have curl
+# or busybox wget).
+for spec in ${INSTALL_TEST_IMAGES:-buildpack-deps:noble-curl:deb buildpack-deps:bookworm-curl:deb alpine:3.21:apk}; do
 	image=${spec%:*} kind=${spec##*:}
 	name="sc-install-$(echo "$image" | tr ':.' '--' | sed 's#.*/##')"
 	echo "=== $image"

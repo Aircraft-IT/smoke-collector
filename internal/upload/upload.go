@@ -41,7 +41,11 @@ type Client struct {
 	// Version and UserAgent are sent as X-Smoke-Collector-Version and User-Agent.
 	Version   string
 	UserAgent string
-	HTTP      *http.Client
+	// ContentType of the body; empty means the `#smoke-host 1` text (text/plain; charset=utf-8).
+	ContentType string
+	// Hints replace the default hints of RejectedError for some status codes (may be nil).
+	Hints map[int]string
+	HTTP  *http.Client
 	// Backoff lists the waits between attempts; its length is the number of retries.
 	Backoff []time.Duration
 	// Sleep waits (replaced in tests). It returns ctx.Err() when the context ends first.
@@ -56,6 +60,9 @@ type Result struct {
 	Status     string `json:"status"` // "created" or "unchanged"
 	AssetID    string `json:"assetId"`
 	SnapshotID string `json:"snapshotId"`
+	// Body is the raw response (at most 64 KiB), for callers with their own response shape.
+	// Text taken from it must go through Scrub before it is printed.
+	Body []byte `json:"-"`
 }
 
 // RejectedError is a 4xx (or unexpected 3xx) response: not retried, exit code 3.
@@ -65,6 +72,8 @@ type RejectedError struct {
 	Message    string   // error.message (scrubbed)
 	Issues     []string // error.details[].issue, e.g. unsupported_os
 	RetryAfter time.Duration
+	// Hint replaces the default hint for HTTPStatus when set.
+	Hint string
 }
 
 func (e *RejectedError) Error() string {
@@ -82,7 +91,11 @@ func (e *RejectedError) Error() string {
 	if e.RetryAfter > 0 {
 		fmt.Fprintf(&b, "; retry after %s", e.RetryAfter.Round(time.Second))
 	}
-	if hint := hints[e.HTTPStatus]; hint != "" {
+	hint := e.Hint
+	if hint == "" {
+		hint = hints[e.HTTPStatus]
+	}
+	if hint != "" {
 		b.WriteString(" — " + hint)
 	}
 	return b.String()
@@ -196,7 +209,11 @@ func (c *Client) once(ctx context.Context, gz []byte) (*Result, time.Duration, e
 		return nil, 0, fmt.Errorf("building the request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	contentType := c.ContentType
+	if contentType == "" {
+		contentType = "text/plain; charset=utf-8"
+	}
+	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Content-Encoding", "gzip")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.UserAgent)
@@ -217,6 +234,7 @@ func (c *Client) once(ctx context.Context, gz []byte) (*Result, time.Duration, e
 		res := &Result{}
 		_ = json.Unmarshal(data, res) // the status code alone decides success
 		res.HTTPStatus = s
+		res.Body = data
 		res.Status, res.AssetID, res.SnapshotID = c.scrub(res.Status), c.scrub(res.AssetID), c.scrub(res.SnapshotID)
 		if res.Status == "" {
 			res.Status = map[int]string{http.StatusOK: "unchanged", http.StatusCreated: "created"}[s]
@@ -229,7 +247,7 @@ func (c *Client) once(ctx context.Context, gz []byte) (*Result, time.Duration, e
 		return nil, 0, &RejectedError{HTTPStatus: s, Message: "unexpected redirect; check url (it must be the Smoke address itself)"}
 	default:
 		code, msg, issues := c.errorBody(data)
-		e := &RejectedError{HTTPStatus: s, Code: code, Message: msg, Issues: issues}
+		e := &RejectedError{HTTPStatus: s, Code: code, Message: msg, Issues: issues, Hint: c.Hints[s]}
 		if s == http.StatusTooManyRequests {
 			e.RetryAfter = retryAfter(resp.Header.Get("Retry-After"))
 		}
@@ -258,6 +276,9 @@ func (c *Client) errorBody(data []byte) (code, msg string, issues []string) {
 	}
 	return c.scrub(clip(body.Error.Code, 64)), c.scrub(clip(body.Error.Message, 300)), issues
 }
+
+// Scrub removes the token and control characters from text that will be printed.
+func (c *Client) Scrub(s string) string { return c.scrub(s) }
 
 // scrub removes the token and control characters from text that will be printed.
 func (c *Client) scrub(s string) string {

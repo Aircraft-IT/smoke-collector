@@ -33,9 +33,11 @@ build:
     CGO_ENABLED: "0"
   script:
     - |
-      for arch in amd64 arm64; do
-        GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w -X gitlab.aircraft.tw/smoke/smoke-collector/internal/version.Version=0.0.0-ci.$CI_COMMIT_SHORT_SHA" \
-          -o bin/smoke-collector_linux_$arch ./cmd/smoke-collector
+      for prog in smoke-collector smoke-container-collector; do
+        for arch in amd64 arm64; do
+          GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w -X gitlab.aircraft.tw/smoke/smoke-collector/internal/version.Version=0.0.0-ci.$CI_COMMIT_SHORT_SHA" \
+            -o bin/${prog}_linux_$arch ./cmd/$prog
+        done
       done
   artifacts:
     paths: [bin/]

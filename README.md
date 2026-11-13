@@ -195,10 +195,15 @@ Go 1.27, standard library plus `golang.org/x/sys`.
 ```sh
 make test           # go test -race ./...
 make lint           # go vet + golangci-lint
-make build-linux    # bin/smoke-collector_linux_{amd64,arm64}
+make build-linux    # bin/smoke-collector_linux_{amd64,arm64}, bin/smoke-container-collector_linux_{amd64,arm64}
 make test-identity  # Docker: --dry-run vs the plan's shell commands on ubuntu:24.04, debian:12, alpine:3.21, rockylinux:9, almalinux:9, ubi9
 make test-signing   # minisign -S -l + install.sh's openssl check, with a throwaway key (needs minisign, OpenSSL 3)
-make test-install   # Docker: install.sh end to end against a fake Smoke (test/fakesmoke), cron path
+make test-install   # Docker: install.sh end to end against a fake Smoke (test/fakesmoke), cron path,
+                    # including --containers against a fake Docker Engine socket
+                    # (INSTALL_TEST_IMAGES="nginx:1.27:deb nginx:alpine:apk" to use other images)
+make test-container-identity  # Docker: the container collector's #os-release/#packages vs the page
+                    # command in the same container (local images only, --pull never;
+                    # CONTAINER_IDENTITY_IMAGES to choose)
 ```
 
 - `testdata/plan-commands/` holds the shell commands from plan §2.1 and §2.2, copied exactly
@@ -226,7 +231,8 @@ Each release:
 SMOKE_REGISTRY=registry.example.com scripts/release.sh 0.1.0
 ```
 
-This builds both binaries with the version stamped in, writes `SHA256SUMS`, and signs it with
+This builds `smoke-collector` and `smoke-container-collector` for amd64 and arm64 with the
+version stamped in, writes `SHA256SUMS`, and signs it with
 `minisign -S -l` (minisign asks for the key password). It writes `install.sh` with the public key
 in place of the placeholder, adds `LATEST` and `smoke-collector.pub`, builds
 `$SMOKE_REGISTRY/smoke/smoke-collector/dist:<version>` from `Dockerfile.dist`, and pushes it.
@@ -240,6 +246,8 @@ The image is busybox with the download tree under `/dist`, laid out like `/downl
 /dist/smoke-collector.pub
 /dist/v0.1.0/smoke-collector_linux_amd64
 /dist/v0.1.0/smoke-collector_linux_arm64
+/dist/v0.1.0/smoke-container-collector_linux_amd64   (from 0.2.0)
+/dist/v0.1.0/smoke-container-collector_linux_arm64   (from 0.2.0)
 /dist/v0.1.0/SHA256SUMS
 /dist/v0.1.0/SHA256SUMS.minisig
 ```
@@ -252,6 +260,104 @@ collector-dist:
   volumes: [collector-downloads:/target]
   restart: "no"
 ```
+
+## Container collector
+
+`smoke-container-collector` reports the images of the running Docker containers and their
+packages (spec FR-COL-08 to 12). It is a separate program on purpose: it needs the `docker`
+group, and **an account in the docker group can control Docker, which is equivalent to root**.
+Keeping it apart leaves `smoke-collector` unprivileged and lets each host decide whether to
+install it.
+
+```sh
+curl -fsSL https://<smoke>/downloads/collector/install.sh | sudo sh -s -- --url https://<smoke> --containers
+```
+
+It asks you to confirm the docker group (non-interactive: `--yes`; to use a filtering proxy
+socket instead of the docker group, see `--docker-host` below) and for the token created
+with "Install container collector" on the host page (scope `containers:write`; it cannot write
+the host's OS inventory). It creates the `smoke-container` user in the `docker` group,
+`/usr/local/bin/smoke-container-collector`, `/etc/smoke-collector/containers.config` (0640
+root:smoke-container; keys `url`, `token` or `token_file`, `docker_host`) and a daily
+`smoke-container-collector.timer` (or cron entry). `--uninstall --containers` removes only the
+container collector. With both installed, `/etc/smoke-collector` is mode 0751 so each user can
+open its own file and neither can read the other's.
+
+### What it reads and sends
+
+It talks to the Docker Engine API over the unix socket (`docker_host`, default
+`unix:///var/run/docker.sock`; `tcp://` is not accepted), API v1.41 (Docker 20.10 or later).
+It sends **GET only, and only to these four paths**; any other request is refused inside the
+program before it is sent ([internal/docker](internal/docker/docker.go), unit-tested):
+
+| Request | Why |
+| --- | --- |
+| `GET /version` | the Engine is reachable and new enough |
+| `GET /containers/json` | the running containers (ID, image, image ID are used) |
+| `GET /images/sha256:<id>/json` | tags and repo digests of each image |
+| `GET /containers/<id>/archive?path=<file>` | what `docker cp` reads, for the files below |
+
+For each distinct image it reads, from one of its running containers, only `/etc/os-release`
+(or `/usr/lib/os-release`; symbolic links are followed inside the container), and
+`/var/lib/dpkg/status` plus `/var/lib/dpkg/status.d/` (distroless images) or
+`/lib/apk/db/installed`, at most 16 MB each. `/var/lib/rpm` and `/usr/lib/sysimage/rpm` are only
+checked for existence. These become the `#os-release` and `#packages` sections of the same
+`#smoke-host 1` text the page command prints (`make test-container-identity` checks this byte
+for byte). It never uses `exec`, never pulls, exports or starts anything, and runs no external
+program.
+
+| Sent | Read but not sent | Never read |
+| --- | --- | --- |
+| image reference (registry, repository, tag), image ID, repo digest, number of running containers; distribution and package list inside the image | container names, labels, ports, mounts and commands in the `/containers/json` response (used only to pick a container) | environment variables (container inspect is never called), volumes, logs, image layers, any other file |
+
+Image statuses: `ok` (with the inventory), `untagged` (no name: not read), `unsupported` (rpm
+database, or a distribution Smoke does not support), `no_packages` (no package database, or the
+files could not be read; a warning says why), `skipped_limit` (more than 50 images: the ones
+with the fewest containers are not read).
+
+`POST <url>/api/v1/collector/containers` with `Content-Type:
+application/vnd.smoke.container-report+json`, `Content-Encoding: gzip`, `User-Agent:
+smoke-container-collector/<version> (linux/<arch>)`, a body like
+
+```json
+{"images":[{"reference":"nginx:1.27","imageId":"sha256:…","repoDigest":"sha256:…","containers":2,"status":"ok","inventory":"#smoke-host 1\n…"}]}
+```
+
+An empty list is still sent when nothing runs (Smoke then removes the deployment links).
+`smoke-container-collector run --dry-run` prints exactly this body; exit codes are the same as
+smoke-collector's (2: Docker not reachable).
+
+### Narrowing Docker access further
+
+If you do not want the account to reach the whole Docker API, put a filtering proxy in front of
+the socket and point `docker_host` at the proxy's socket. For example with HAProxy (sketch):
+
+```haproxy
+frontend docker_ro
+    mode http
+    bind unix@/run/smoke-docker.sock mode 660 group smoke-container
+    http-request deny unless METH_GET
+    acl ok path -m reg ^/v1\.41/(version|containers/json|images/sha256:[0-9a-f]{64}/json|containers/[0-9a-f]{64}/archive)$
+    http-request deny unless ok
+    default_backend docker
+backend docker
+    mode http
+    server engine /var/run/docker.sock
+```
+
+Then install with the proxy socket:
+
+```sh
+curl -fsSL https://<smoke>/downloads/collector/install.sh | sudo sh -s -- --url https://<smoke> \
+  --containers --docker-host unix:///run/smoke-docker.sock
+```
+
+With `--docker-host`, `smoke-container` is **not** added to the `docker` group (an earlier
+installation's membership is removed), `docker_host` is written to `containers.config`, and the
+systemd unit has no `SupplementaryGroups=docker`. Give the account access to the proxy socket
+yourself (above: the socket's group is `smoke-container`). Upgrades without `--docker-host` keep
+the configured socket. The archive endpoint can still read any file of a running container, so
+the proxy narrows what can be changed, not what can be read.
 
 ## License
 

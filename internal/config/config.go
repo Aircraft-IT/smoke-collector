@@ -1,6 +1,8 @@
 // Package config loads the collector configuration (OS detection plan §5.1):
 // the key=value file /etc/smoke-collector/config, overridden by the
 // SMOKE_COLLECTOR_URL and SMOKE_COLLECTOR_TOKEN environment variables.
+// The container collector (plan §4a, spec FR-COL-08) uses the same rules with its own
+// file, variables, endpoint and the extra docker_host key (ContainerCollector).
 //
 // The token is a secret. No error message or warning produced here contains
 // it, or any line of the configuration file (a token may sit on a malformed line).
@@ -15,7 +17,9 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -31,6 +35,33 @@ const (
 	maxFileBytes  = 64 << 10
 	maxTokenBytes = 512
 )
+
+// Spec says which file, environment variables and endpoint a program uses.
+type Spec struct {
+	// Path is the default configuration file.
+	Path     string
+	EnvURL   string
+	EnvToken string
+	// EnvDockerHost overrides docker_host; empty means the program has no docker_host key.
+	EnvDockerHost string
+	// ReportPath is the upload API, relative to the Smoke URL.
+	ReportPath string
+}
+
+// Collector is the OS collector (smoke-collector).
+var Collector = Spec{Path: DefaultPath, EnvURL: EnvURL, EnvToken: EnvToken, ReportPath: ReportPath}
+
+// ContainerCollector is the container collector (smoke-container-collector, spec FR-COL-08).
+var ContainerCollector = Spec{
+	Path:          "/etc/smoke-collector/containers.config",
+	EnvURL:        "SMOKE_CONTAINER_COLLECTOR_URL",
+	EnvToken:      "SMOKE_CONTAINER_COLLECTOR_TOKEN",
+	EnvDockerHost: "SMOKE_CONTAINER_COLLECTOR_DOCKER_HOST",
+	ReportPath:    "/api/v1/collector/containers",
+}
+
+// DefaultDockerHost is the Docker Engine socket used when docker_host is not set.
+const DefaultDockerHost = "unix:///var/run/docker.sock"
 
 // Source says where a setting came from.
 type Source string
@@ -56,8 +87,14 @@ type Config struct {
 	// TokenFile is the token_file setting, when used.
 	TokenFile string
 
+	// DockerHost is docker_host (container collector only; DefaultDockerHost when not set).
+	DockerHost       string
+	DockerHostSource Source
+
 	// InsecureHTTP allows an http:// URL for localhost (tests only); set from the command line.
 	InsecureHTTP bool
+
+	spec Spec
 
 	// Warnings are non-fatal problems (for example a world-readable file holding the token).
 	Warnings []string
@@ -76,17 +113,38 @@ var keyRe = regexp.MustCompile(`^[a-z_]{1,32}$`)
 // may hold everything) and applies the environment. getenv is os.Getenv in production.
 // Load does not check that the result is complete; call Validate for that.
 func Load(path string, getenv func(string) string) (*Config, error) {
-	c := &Config{Path: path}
+	return LoadSpec(Collector, path, getenv)
+}
+
+// LoadSpec is Load for the program described by spec.
+func LoadSpec(spec Spec, path string, getenv func(string) string) (*Config, error) {
+	c := &Config{Path: path, spec: spec}
 	if err := c.loadFile(path); err != nil {
 		return nil, err
 	}
-	if v := strings.TrimSpace(getenv(EnvURL)); v != "" {
+	if v := strings.TrimSpace(getenv(spec.EnvURL)); v != "" {
 		c.URL, c.URLSource = v, SourceEnv
 	}
-	if v := strings.TrimSpace(getenv(EnvToken)); v != "" {
+	if v := strings.TrimSpace(getenv(spec.EnvToken)); v != "" {
 		c.Token, c.TokenSource, c.TokenFile = v, SourceEnv, ""
 	}
+	if spec.EnvDockerHost != "" {
+		if v := strings.TrimSpace(getenv(spec.EnvDockerHost)); v != "" {
+			c.DockerHost, c.DockerHostSource = v, SourceEnv
+		}
+		if c.DockerHost == "" {
+			c.DockerHost = DefaultDockerHost
+		}
+	}
 	return c, nil
+}
+
+func (c *Config) knownKeys() []string {
+	keys := []string{"url", "token", "token_file"}
+	if c.spec.EnvDockerHost != "" {
+		keys = append(keys, "docker_host")
+	}
+	return keys
 }
 
 func (c *Config) loadFile(path string) error {
@@ -128,10 +186,8 @@ func (c *Config) loadFile(path string) error {
 			// Never quote the line: it may be a pasted token.
 			return errorf("%s line %d: expected key=value", path, n)
 		}
-		switch k {
-		case "url", "token", "token_file":
-		default:
-			return errorf("%s line %d: unknown key %q (known: url, token, token_file)", path, n, k)
+		if !slices.Contains(c.knownKeys(), k) {
+			return errorf("%s line %d: unknown key %q (known: %s)", path, n, k, strings.Join(c.knownKeys(), ", "))
 		}
 		if _, dup := values[k]; dup {
 			return errorf("%s line %d: %s is set twice", path, n, k)
@@ -144,6 +200,9 @@ func (c *Config) loadFile(path string) error {
 
 	if v := values["url"]; v != "" {
 		c.URL, c.URLSource = v, SourceFile
+	}
+	if v := values["docker_host"]; v != "" {
+		c.DockerHost, c.DockerHostSource = v, SourceFile
 	}
 	tok, tokFile := values["token"], values["token_file"]
 	switch {
@@ -200,16 +259,51 @@ func unquote(v string) string {
 
 // Validate checks that the configuration can be used to upload.
 func (c *Config) Validate() error {
+	spec := c.Spec()
 	if c.URL == "" {
-		return errorf("url is not set (in %s or %s)", c.Path, EnvURL)
+		return errorf("url is not set (in %s or %s)", c.Path, spec.EnvURL)
 	}
-	if _, err := Endpoint(c.URL, c.InsecureHTTP); err != nil {
+	if _, err := c.Endpoint(); err != nil {
 		return err
 	}
 	if c.Token == "" {
-		return errorf("token is not set (token or token_file in %s, or %s)", c.Path, EnvToken)
+		return errorf("token is not set (token or token_file in %s, or %s)", c.Path, spec.EnvToken)
 	}
-	return CheckToken(c.Token)
+	if err := CheckToken(c.Token); err != nil {
+		return err
+	}
+	if spec.EnvDockerHost != "" {
+		if _, err := DockerSocket(c.DockerHost); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Spec is the program the configuration was loaded for (Collector for a zero Config).
+func (c *Config) Spec() Spec {
+	if c.spec.ReportPath == "" {
+		return Collector
+	}
+	return c.spec
+}
+
+// Endpoint is the report endpoint of the configured URL (see EndpointFor).
+func (c *Config) Endpoint() (string, error) {
+	return EndpointFor(c.URL, c.InsecureHTTP, c.Spec().ReportPath)
+}
+
+// DockerSocket returns the socket path of a docker_host value: only unix:// with an absolute,
+// clean path is accepted (no tcp://: the container collector talks to the local Engine only).
+func DockerSocket(host string) (string, error) {
+	p, ok := strings.CutPrefix(host, "unix://")
+	if !ok {
+		return "", errorf("docker_host must look like unix:///var/run/docker.sock (only unix sockets are supported)")
+	}
+	if !path.IsAbs(p) || path.Clean(p) != p || strings.ContainsAny(p, "?#\x00") || len(p) > 1024 {
+		return "", errorf("docker_host must be unix:// followed by an absolute path")
+	}
+	return p, nil
 }
 
 // CheckToken rejects tokens that cannot be sent in an Authorization header.
@@ -229,6 +323,11 @@ func CheckToken(t string) error {
 // Endpoint validates the Smoke URL and returns the report endpoint. Only https://
 // is accepted, except http:// to localhost when insecureHTTP is set.
 func Endpoint(raw string, insecureHTTP bool) (string, error) {
+	return EndpointFor(raw, insecureHTTP, ReportPath)
+}
+
+// EndpointFor is Endpoint with another API path (reportPath, starting with /).
+func EndpointFor(raw string, insecureHTTP bool, reportPath string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" || u.Opaque != "" {
 		return "", errorf("url must look like https://smoke.example.com")
@@ -252,7 +351,7 @@ func Endpoint(raw string, insecureHTTP bool) (string, error) {
 		return "", errorf("url must use https://")
 	}
 	u.Scheme = strings.ToLower(u.Scheme)
-	u.Path = strings.TrimRight(u.Path, "/") + ReportPath
+	u.Path = strings.TrimRight(u.Path, "/") + reportPath
 	u.RawPath = ""
 	return u.String(), nil
 }

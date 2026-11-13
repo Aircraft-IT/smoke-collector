@@ -17,6 +17,10 @@ var valid = regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$`)
 func Valid(v string) bool { return valid.MatchString(v) }
 
 // UserAgent is the User-Agent header: smoke-collector/<version> (linux/<arch>).
-func UserAgent() string {
-	return "smoke-collector/" + Version + " (" + runtime.GOOS + "/" + runtime.GOARCH + ")"
+func UserAgent() string { return UserAgentFor("smoke-collector") }
+
+// UserAgentFor is UserAgent for another program of this repository
+// (smoke-container-collector/<version> (linux/<arch>)).
+func UserAgentFor(program string) string {
+	return program + "/" + Version + " (" + runtime.GOOS + "/" + runtime.GOARCH + ")"
 }

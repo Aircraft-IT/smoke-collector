@@ -5,7 +5,7 @@ BIN := bin
 VERSION ?= 0.1.0-dev
 LDFLAGS := -s -w -X gitlab.aircraft.tw/smoke/smoke-collector/internal/version.Version=$(VERSION)
 
-.PHONY: all build build-linux test lint fmt tidy test-identity test-signing test-install test-all release
+.PHONY: all build build-linux test lint fmt tidy test-identity test-container-identity test-signing test-install test-all release
 
 all: lint test build
 
@@ -14,9 +14,11 @@ build:
 
 ## build-linux: static binaries for the release targets
 build-linux:
-	for arch in amd64 arm64; do \
-		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch $(GO) build -trimpath -ldflags "$(LDFLAGS)" \
-			-o $(BIN)/smoke-collector_linux_$$arch ./cmd/smoke-collector || exit 1; \
+	for prog in smoke-collector smoke-container-collector; do \
+		for arch in amd64 arm64; do \
+			CGO_ENABLED=0 GOOS=linux GOARCH=$$arch $(GO) build -trimpath -ldflags "$(LDFLAGS)" \
+				-o $(BIN)/$${prog}_linux_$$arch ./cmd/$$prog || exit 1; \
+		done; \
 	done
 
 test:
@@ -35,6 +37,11 @@ tidy:
 ## test-identity: --dry-run vs the plan's shell commands, byte for byte (Docker)
 test-identity:
 	sh scripts/test-identity.sh
+
+## test-container-identity: smoke-container-collector vs the page command run in the same
+## containers (Docker; local images only)
+test-container-identity:
+	sh scripts/test-container-identity.sh
 
 ## test-signing: minisign -S -l and install.sh's openssl check (minisign, OpenSSL 3)
 test-signing:

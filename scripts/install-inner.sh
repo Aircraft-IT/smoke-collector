@@ -126,5 +126,109 @@ else
 	echo "SKIP  no script(1) for the interactive prompt test"
 fi
 
+# --- container collector (install.sh --containers) ---------------------------------------------
+# A second fakesmoke on :8081 also serves a fake Docker Engine on /var/run/docker.sock (group
+# docker, 0660) whose one container is this test container's own file system.
+URL2=http://localhost:8081
+pipe_c() { $fetch "$URL/downloads/collector/install.sh" | sh -s -- --url "$URL2" --insecure-http --containers "$@"; }
+
+expect 1 "no docker group" "--containers without a docker group is refused" pipe_c --token-file /t/token $sigflag --yes --no-run
+if command -v groupadd >/dev/null; then groupadd --system docker; else addgroup -S docker; fi
+gid=$(awk -F: '$1 == "docker" { print $3 }' /etc/group)
+mkdir -p /var/run
+/t/fakesmoke -addr :8081 -dir /tmp/www -token-file /t/token -save-containers /tmp/last-containers.json \
+	-docker-socket /var/run/docker.sock -docker-gid "$gid" >/tmp/fakesmoke2.log 2>&1 &
+i=0
+until [ -S /var/run/docker.sock ] && $fetch "$URL2/downloads/collector/LATEST" >/dev/null 2>&1; do
+	i=$((i + 1)); [ $i -lt 50 ] || { echo "fakesmoke 2 did not start"; cat /tmp/fakesmoke2.log; exit 1; }
+	sleep 0.1
+done
+expect 1 "pass --yes" "without a terminal and without --yes the docker group is not confirmed" pipe_c --token-file /t/token $sigflag --no-run
+check "  ...and nothing was installed" sh -c '! id smoke-container >/dev/null 2>&1 && ! [ -e /usr/local/bin/smoke-container-collector ]'
+
+# Both collectors on one host: the OS collector first, then the container collector.
+expect 0 "" "OS collector installed again" pipe_install --token-file /t/token $sigflag --no-service --no-run
+expect 0 "report accepted (HTTP 200, 1 images" "install --containers --yes and first run: report accepted" \
+	pipe_c --token-file /t/token $sigflag --yes
+grep -q "added smoke-container to the docker group" /tmp/out && ok "  ...smoke-container added to the docker group" || bad "  ...docker group message"
+grep -q "local/install-test:1: created" /tmp/out && ok "  ...per-image result printed" || bad "  ...per-image result"
+grep -q "container report accepted: 1 images" /tmp/fakesmoke2.log && ok "fakesmoke received the gzip container report" || bad "fakesmoke 2 log: $(cat /tmp/fakesmoke2.log)"
+check "the fake Docker Engine was asked for nothing outside the allowlist" sh -c '! grep -q "docker: refused" /tmp/fakesmoke2.log'
+check "binary 0755 root:root" [ "$(mode /usr/local/bin/smoke-container-collector)" = "755 root:root" ]
+check "containers.config 0640 root:smoke-container" [ "$(mode /etc/smoke-collector/containers.config)" = "640 root:smoke-container" ]
+check "OS config still 0640 root:smoke-collector" [ "$(mode /etc/smoke-collector/config)" = "640 root:smoke-collector" ]
+check "shared config dir 0751 root:smoke-collector" [ "$(mode /etc/smoke-collector)" = "751 root:smoke-collector" ]
+check "smoke-container is in the docker group" sh -c 'id -nG smoke-container | tr " " "\n" | grep -qx docker'
+check "smoke-collector is not in the docker group" sh -c '! id -nG smoke-collector | tr " " "\n" | grep -qx docker'
+if [ "$kind" = deb ]; then
+	check "cron entry runs as smoke-container" \
+		grep -Eq '^[0-9]+ [0-9]+ \* \* \* smoke-container /usr/local/bin/smoke-container-collector run' /etc/cron.d/smoke-container-collector
+else
+	check "crontab /etc/crontabs/smoke-container" \
+		grep -Eq '^[0-9]+ [0-9]+ \* \* \* /usr/local/bin/smoke-container-collector run' /etc/crontabs/smoke-container
+fi
+if [ "$kind" = deb ]; then pm='#packages dpkg'; else pm='#packages apk'; fi
+check "the report has the image reference and this container's packages" \
+	sh -c "grep -q '\"reference\":\"local/install-test:1\"' /tmp/last-containers.json && grep -q '\"status\":\"ok\"' /tmp/last-containers.json && grep -qF '$pm' /tmp/last-containers.json"
+runas_c() { su -s /bin/sh smoke-container -c "$1"; }
+expect 0 "" "smoke-container-collector run --dry-run as smoke-container" runas_c "/usr/local/bin/smoke-container-collector run --dry-run"
+check "the uploaded container report is exactly what --dry-run prints" cmp -s /tmp/out /tmp/last-containers.json
+expect 1 "ermission denied" "smoke-container cannot read the OS collector's config" runas_c "cat /etc/smoke-collector/config"
+expect 1 "ermission denied" "smoke-collector cannot read the container collector's config" runas "cat /etc/smoke-collector/containers.config"
+expect 0 "status:        ok" "smoke-collector print-config still works" runas "/usr/local/bin/smoke-collector print-config --insecure-http"
+expect 0 "is already in the docker group" "re-running --containers (upgrade) needs no confirmation and keeps the token" pipe_c $sigflag --no-run
+grep -q "keeping the token" /tmp/out && ok "  ...token kept" || bad "  ...token not kept"
+
+expect 0 "removed" "--uninstall --containers" sh /repo/install.sh --uninstall --containers
+check "container collector gone, OS collector kept, dir back to 0750" sh -c '! [ -e /usr/local/bin/smoke-container-collector ] &&
+	! [ -e /etc/smoke-collector/containers.config ] && ! id smoke-container >/dev/null 2>&1 &&
+	[ -x /usr/local/bin/smoke-collector ] && [ -f /etc/smoke-collector/config ] && [ "$(stat -c %a /etc/smoke-collector)" = 750 ]'
+expect 0 "" "install --containers again" pipe_c --token-file /t/token $sigflag --yes --no-run
+expect 0 "removed" "--uninstall (OS collector) keeps the container collector" sh /repo/install.sh --uninstall
+check "  ...containers.config kept, dir 0751 root:root" sh -c '[ -f /etc/smoke-collector/containers.config ] &&
+	! [ -e /etc/smoke-collector/config ] && [ "$(stat -c "%a %U:%G" /etc/smoke-collector)" = "751 root:root" ]'
+expect 0 "" "the container collector still reads its config" runas_c "/usr/local/bin/smoke-container-collector print-config --insecure-http"
+expect 0 "removed" "--uninstall --containers last" sh /repo/install.sh --uninstall --containers
+check "  ...everything gone" sh -c '! [ -e /etc/smoke-collector ] && ! [ -e /usr/local/bin/smoke-container-collector ]'
+
+# --docker-host: a proxy socket (here a third fakesmoke, group smoke-proxy) instead of the docker group.
+if command -v groupadd >/dev/null; then groupadd --system smoke-proxy; else addgroup -S smoke-proxy; fi
+pgid=$(awk -F: '$1 == "smoke-proxy" { print $3 }' /etc/group)
+/t/fakesmoke -addr :8082 -dir /tmp/www -token-file /t/token -save-containers /tmp/last-proxy.json \
+	-docker-socket /run/smoke-docker.sock -docker-gid "$pgid" >/tmp/fakesmoke3.log 2>&1 &
+URL3=http://localhost:8082
+i=0
+until [ -S /run/smoke-docker.sock ] && $fetch "$URL3/downloads/collector/LATEST" >/dev/null 2>&1; do
+	i=$((i + 1)); [ $i -lt 50 ] || { echo "fakesmoke 3 did not start"; cat /tmp/fakesmoke3.log; exit 1; }
+	sleep 0.1
+done
+pipe_p() { $fetch "$URL/downloads/collector/install.sh" | sh -s -- --url "$URL3" --insecure-http --containers "$@"; }
+in_docker() { id -nG smoke-container 2>/dev/null | tr ' ' '\n' | grep -qx docker; }
+expect 1 "only unix sockets" "--docker-host tcp:// is refused" pipe_p --docker-host tcp://127.0.0.1:2375 --token-file /t/token $sigflag --yes --no-run
+expect 1 "only for --containers" "--docker-host without --containers is refused" \
+	sh /repo/install.sh --url "$URL3" --insecure-http --skip-signature --docker-host unix:///run/x.sock --token-file /t/token
+expect 0 "not added to the docker group" "install --containers --docker-host --yes" \
+	pipe_p --docker-host unix:///run/smoke-docker.sock --token-file /t/token $sigflag --yes --no-run
+check "  ...smoke-container is not in the docker group" sh -c "! id -nG smoke-container | tr ' ' '\n' | grep -qx docker"
+check "  ...containers.config has docker_host" grep -qx "docker_host=unix:///run/smoke-docker.sock" /etc/smoke-collector/containers.config
+expect 2 "cannot reach Docker" "without access to the proxy socket the run fails (exit 2)" \
+	runas_c "/usr/local/bin/smoke-container-collector run --insecure-http"
+if command -v usermod >/dev/null; then usermod -aG smoke-proxy smoke-container; else addgroup smoke-container smoke-proxy; fi
+expect 0 "report accepted" "with the proxy socket's group the run succeeds" runas_c "/usr/local/bin/smoke-container-collector run --insecure-http"
+grep -q "container report accepted: 1 images" /tmp/fakesmoke3.log && ok "  ...through the proxy socket" || bad "fakesmoke 3 log: $(cat /tmp/fakesmoke3.log)"
+expect 0 "keeping docker_host=unix:///run/smoke-docker.sock" "upgrade without --docker-host keeps the proxy socket" pipe_p $sigflag --no-run
+if in_docker; then echo "in docker group" >/tmp/out; bad "  ...still not in the docker group"; else ok "  ...still not in the docker group"; fi
+expect 0 "removed" "--uninstall --containers (proxy)" sh /repo/install.sh --uninstall --containers
+# From the docker group to a proxy socket: the docker group is taken away.
+expect 0 "added smoke-container to the docker group" "install --containers with the docker group" pipe_c --token-file /t/token $sigflag --yes --no-run
+expect 0 "removed smoke-container from the docker group" "re-install with --docker-host leaves the docker group" \
+	pipe_p --docker-host unix:///run/smoke-docker.sock $sigflag --yes --no-run
+if in_docker; then echo "in docker group" >/tmp/out; bad "  ...not in the docker group any more"; else ok "  ...not in the docker group any more"; fi
+expect 0 "removed" "--uninstall --containers" sh /repo/install.sh --uninstall --containers
+cat /tmp/fakesmoke3.log >>/tmp/all-output
+
+cat /tmp/fakesmoke2.log >>/tmp/all-output
+if grep -qF -- "$TOKEN" /tmp/all-output; then echo "token printed" >/tmp/out; bad "the token never appears in any output (containers)"; else ok "the token never appears in any output (containers)"; fi
+
 echo "RESULT $pass passed, $fail failed"
 [ "$fail" = 0 ]

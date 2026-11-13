@@ -14,8 +14,10 @@ func TestInstallScriptUnitsMatchRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 	for marker, file := range map[string]string{
-		"SERVICE": "../../systemd/smoke-collector.service",
-		"TIMER":   "../../systemd/smoke-collector.timer",
+		"SERVICE":           "../../systemd/smoke-collector.service",
+		"TIMER":             "../../systemd/smoke-collector.timer",
+		"CONTAINER_SERVICE": "../../systemd/smoke-container-collector.service",
+		"CONTAINER_TIMER":   "../../systemd/smoke-container-collector.timer",
 	} {
 		want, err := os.ReadFile(file)
 		if err != nil {
