@@ -53,11 +53,22 @@ if [ -n "$sigflag" ]; then
 	expect 1 "apk add openssl" "without openssl the signature check stops and says how to fix it" \
 		pipe_install --token-file /t/token
 fi
-expect 1 "no terminal" "without a terminal and without --token-file it stops" pipe_install $sigflag --no-service
+expect 1 "terms must be accepted first" "without a terminal and without --accept-terms it stops" \
+	pipe_install --token-file /t/token $sigflag
+check "  ...and nothing was installed" sh -c '! id smoke-collector >/dev/null 2>&1 && ! [ -e /usr/local/bin/smoke-collector ] && ! [ -e /etc/smoke-collector ]'
+expect 1 "no terminal" "without a terminal and without --token-file it stops" pipe_install $sigflag --no-service --accept-terms
+expect 0 "安裝與使用條款" "--show-terms --lang zh-TW prints the terms (no root needed)" \
+	su -s /bin/sh nobody -c "sh /tmp/install.sh --show-terms --lang zh-TW --url $URL"
+grep -qF -- "--uninstall" /tmp/out && grep -q "免責聲明" /tmp/out && ok "  ...with the disclaimer and the uninstall command" || bad "  ...terms text"
+expect 0 "installation terms" "--show-terms in English" sh /tmp/install.sh --show-terms --lang en
+expect 1 "--lang must be" "--lang fr is refused" sh /tmp/install.sh --show-terms --lang fr
 
 # Fresh install through the documented pipe, signature checked when openssl exists.
 expect 0 "report created" "install (curl|wget ... | sh -s -- --url ...) and first run: 201 created" \
-	pipe_install --token-file /t/token $sigflag
+	pipe_install --token-file /t/token $sigflag --accept-terms
+grep -q "accepted with --accept-terms" /tmp/out && ok "  ...terms accepted with --accept-terms" || bad "  ...terms message"
+check "terms record 0644 root:root with version and how" sh -c '[ "$(stat -c "%a %U:%G" /etc/smoke-collector/terms-accepted)" = "644 root:root" ] &&
+	grep -q "^terms_version=" /etc/smoke-collector/terms-accepted && grep -qx "accepted_with=--accept-terms" /etc/smoke-collector/terms-accepted'
 [ -z "$sigflag" ] && { grep -q "signature of SHA256SUMS verified" /tmp/out && ok "signature verified with openssl" || bad "signature not verified"; }
 grep -q "report created" /tmp/fakesmoke.log && ok "fakesmoke received a gzip report with the token" || bad "fakesmoke log: $(cat /tmp/fakesmoke.log)"
 check "binary 0755 root:root" [ "$(mode /usr/local/bin/smoke-collector)" = "755 root:root" ]
@@ -87,6 +98,7 @@ expect 0 "report unchanged" "smoke-collector run again: 200 unchanged" runas "/u
 # Upgrade: no terminal, no --token-file: the existing token is kept.
 expect 0 "keeping the token" "re-running install.sh keeps the existing token (no prompt)" pipe_install $sigflag --no-service
 grep -q "report unchanged" /tmp/out && ok "  ...and the run reports unchanged" || bad "  ...run output"
+grep -q "already accepted on this host" /tmp/out && ok "  ...and the accepted terms are not asked again" || bad "  ...terms asked again"
 
 # Wrong token: the install completes but the first run is rejected (exit 3, 401).
 expect 3 "HTTP 401 UNAUTHENTICATED" "a wrong token gives exit 3 with the server's code" \
@@ -114,13 +126,20 @@ check "binary, config, cron entries and user are gone" sh -c '! [ -e /usr/local/
 # Interactive install: the token is typed at the /dev/tty prompt (a pty from script(1)) with
 # echo off, so it must not appear in what the terminal shows.
 if command -v script >/dev/null; then
-	cmd="sh /tmp/install.sh --url $URL --insecure-http $sigflag --no-service --no-run"
-	(sleep 2; printf '%s\n' "$TOKEN"; sleep 1) | script -q -c "$cmd" /dev/null >/tmp/out 2>&1
-	if grep -q "input hidden" /tmp/out && grep -qx "token=$TOKEN" /etc/smoke-collector/config && ! grep -qF -- "$TOKEN" /tmp/out; then
-		ok "token typed at the /dev/tty prompt is stored and not echoed"
+	cmd="sh /tmp/install.sh --url $URL --insecure-http $sigflag --no-service --no-run --lang en"
+	(sleep 2; printf 'n\n'; sleep 1) | script -q -c "$cmd" /dev/null >/tmp/out 2>&1
+	if grep -q "Type y to accept" /tmp/out && grep -q "terms not accepted" /tmp/out && ! [ -e /usr/local/bin/smoke-collector ]; then
+		ok "answering n at the terms prompt installs nothing"
 	else
-		bad "token typed at the /dev/tty prompt"
+		bad "answering n at the terms prompt"
 	fi
+	(sleep 2; printf 'y\n'; sleep 2; printf '%s\n' "$TOKEN"; sleep 1) | script -q -c "$cmd" /dev/null >/tmp/out 2>&1
+	if grep -q "Disclaimer" /tmp/out && grep -q "input hidden" /tmp/out && grep -qx "token=$TOKEN" /etc/smoke-collector/config && ! grep -qF -- "$TOKEN" /tmp/out; then
+		ok "terms accepted with y, then the token typed at the /dev/tty prompt is stored and not echoed"
+	else
+		bad "terms prompt, then token typed at the /dev/tty prompt"
+	fi
+	check "  ...recorded as accepted at the prompt" grep -qx "accepted_with=prompt" /etc/smoke-collector/terms-accepted
 	sh /repo/install.sh --uninstall >/dev/null 2>&1
 else
 	echo "SKIP  no script(1) for the interactive prompt test"
@@ -143,13 +162,14 @@ until [ -S /var/run/docker.sock ] && $fetch "$URL2/downloads/collector/LATEST" >
 	i=$((i + 1)); [ $i -lt 50 ] || { echo "fakesmoke 2 did not start"; cat /tmp/fakesmoke2.log; exit 1; }
 	sleep 0.1
 done
-expect 1 "pass --yes" "without a terminal and without --yes the docker group is not confirmed" pipe_c --token-file /t/token $sigflag --no-run
+expect 1 "--accept-terms" "without a terminal and without --accept-terms the container collector is not installed" pipe_c --token-file /t/token $sigflag --no-run
 check "  ...and nothing was installed" sh -c '! id smoke-container >/dev/null 2>&1 && ! [ -e /usr/local/bin/smoke-container-collector ]'
 
 # Both collectors on one host: the OS collector first, then the container collector.
-expect 0 "" "OS collector installed again" pipe_install --token-file /t/token $sigflag --no-service --no-run
-expect 0 "report accepted (HTTP 200, 1 images" "install --containers --yes and first run: report accepted" \
-	pipe_c --token-file /t/token $sigflag --yes
+expect 0 "" "OS collector installed again" pipe_install --token-file /t/token $sigflag --no-service --no-run --accept-terms
+expect 0 "report accepted (HTTP 200, 1 images" "install --containers --accept-terms and first run: report accepted" \
+	pipe_c --token-file /t/token $sigflag --accept-terms
+check "  ...container terms recorded separately" sh -c '[ -f /etc/smoke-collector/containers.terms-accepted ] && [ -f /etc/smoke-collector/terms-accepted ]' 
 grep -q "added smoke-container to the docker group" /tmp/out && ok "  ...smoke-container added to the docker group" || bad "  ...docker group message"
 grep -q "local/install-test:1: created" /tmp/out && ok "  ...per-image result printed" || bad "  ...per-image result"
 grep -q "container report accepted: 1 images" /tmp/fakesmoke2.log && ok "fakesmoke received the gzip container report" || bad "fakesmoke 2 log: $(cat /tmp/fakesmoke2.log)"
@@ -176,16 +196,18 @@ check "the uploaded container report is exactly what --dry-run prints" cmp -s /t
 expect 1 "ermission denied" "smoke-container cannot read the OS collector's config" runas_c "cat /etc/smoke-collector/config"
 expect 1 "ermission denied" "smoke-collector cannot read the container collector's config" runas "cat /etc/smoke-collector/containers.config"
 expect 0 "status:        ok" "smoke-collector print-config still works" runas "/usr/local/bin/smoke-collector print-config --insecure-http"
-expect 0 "is already in the docker group" "re-running --containers (upgrade) needs no confirmation and keeps the token" pipe_c $sigflag --no-run
+expect 0 "already accepted on this host" "re-running --containers (upgrade) needs no confirmation and keeps the token" pipe_c $sigflag --no-run
 grep -q "keeping the token" /tmp/out && ok "  ...token kept" || bad "  ...token not kept"
 
 expect 0 "removed" "--uninstall --containers" sh /repo/install.sh --uninstall --containers
 check "container collector gone, OS collector kept, dir back to 0750" sh -c '! [ -e /usr/local/bin/smoke-container-collector ] &&
-	! [ -e /etc/smoke-collector/containers.config ] && ! id smoke-container >/dev/null 2>&1 &&
+	! [ -e /etc/smoke-collector/containers.config ] && ! [ -e /etc/smoke-collector/containers.terms-accepted ] &&
+	[ -f /etc/smoke-collector/terms-accepted ] && ! id smoke-container >/dev/null 2>&1 &&
 	[ -x /usr/local/bin/smoke-collector ] && [ -f /etc/smoke-collector/config ] && [ "$(stat -c %a /etc/smoke-collector)" = 750 ]'
 expect 0 "" "install --containers again" pipe_c --token-file /t/token $sigflag --yes --no-run
 expect 0 "removed" "--uninstall (OS collector) keeps the container collector" sh /repo/install.sh --uninstall
-check "  ...containers.config kept, dir 0751 root:root" sh -c '[ -f /etc/smoke-collector/containers.config ] &&
+check "  ...containers.config and its terms record kept, dir 0751 root:root" sh -c '[ -f /etc/smoke-collector/containers.config ] &&
+	[ -f /etc/smoke-collector/containers.terms-accepted ] && ! [ -e /etc/smoke-collector/terms-accepted ] &&
 	! [ -e /etc/smoke-collector/config ] && [ "$(stat -c "%a %U:%G" /etc/smoke-collector)" = "751 root:root" ]'
 expect 0 "" "the container collector still reads its config" runas_c "/usr/local/bin/smoke-container-collector print-config --insecure-http"
 expect 0 "removed" "--uninstall --containers last" sh /repo/install.sh --uninstall --containers
