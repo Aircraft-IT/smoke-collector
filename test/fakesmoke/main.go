@@ -2,7 +2,8 @@
 // download tree under /downloads/collector/ and implements enough of
 // POST /api/v1/collector/report (OS detection plan §5.2) to exercise the collector:
 // bearer token, gzip, the #smoke-host 1 marker, 201 created / 200 unchanged by SHA-256.
-// It also accepts POST /api/v1/collector/containers (the container collector) and, with
+// It also accepts POST /api/v1/collector/lockfiles (plan §4b) and
+// POST /api/v1/collector/containers (the container collector) and, with
 // -docker-socket, serves a minimal Docker Engine API on that unix socket: one running container
 // whose files are this machine's own (see docker.go).
 // It never prints the token. Test use only.
@@ -31,8 +32,10 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "listen address")
 	dir := flag.String("dir", "", "download tree served at /downloads/collector/")
 	tokenFile := flag.String("token-file", "", "file holding the accepted token")
+	containersTokenFile := flag.String("containers-token-file", "", "file holding the token accepted by /collector/containers (default: -token-file)")
 	save := flag.String("save", "", "write the last accepted report here")
 	saveContainers := flag.String("save-containers", "", "write the last accepted container report here")
+	saveLockfiles := flag.String("save-lockfiles", "", "write the last accepted lockfile report here")
 	dockerSocket := flag.String("docker-socket", "", "serve a fake Docker Engine API on this unix socket")
 	dockerGroup := flag.Int("docker-gid", -1, "group of the fake Docker socket (mode 0660)")
 	flag.Parse()
@@ -41,6 +44,14 @@ func main() {
 		log.Fatal(err)
 	}
 	token := strings.TrimSpace(string(tok))
+	containersToken := token
+	if *containersTokenFile != "" {
+		ctok, err := os.ReadFile(*containersTokenFile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		containersToken = strings.TrimSpace(string(ctok))
+	}
 
 	var mu sync.Mutex
 	var last string
@@ -97,8 +108,9 @@ func main() {
 			status, code = "unchanged", 200
 		}
 		//nolint:gosec // header values are %q-quoted; test server only
-		log.Printf("report %s: %d bytes sha256=%s gzip=%v ua=%q version=%q", status, len(data), h[:12],
-			r.Header.Get("Content-Encoding") == "gzip", r.UserAgent(), r.Header.Get("X-Smoke-Collector-Version"))
+		log.Printf("report %s: %d bytes sha256=%s gzip=%v ua=%q version=%q scans=%q", status, len(data), h[:12],
+			r.Header.Get("Content-Encoding") == "gzip", r.UserAgent(), r.Header.Get("X-Smoke-Collector-Version"),
+			r.Header.Get("X-Smoke-Collector-Scans"))
 		reply(code, map[string]string{"status": status, "assetId": "asset-1", "snapshotId": "snap-" + h[:8]})
 	})
 	mux.HandleFunc("POST /api/v1/collector/containers", func(w http.ResponseWriter, r *http.Request) {
@@ -108,7 +120,7 @@ func main() {
 			_ = json.NewEncoder(w).Encode(v)
 		}
 		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+		if subtle.ConstantTimeCompare([]byte(got), []byte(containersToken)) != 1 {
 			log.Printf("container report rejected: 401")
 			reply(401, map[string]any{"error": map[string]string{"code": "UNAUTHENTICATED", "message": "Invalid token"}})
 			return
@@ -148,6 +160,56 @@ func main() {
 		//nolint:gosec // header values are %q-quoted; test server only
 		log.Printf("container report accepted: %d images, %d bytes ua=%q", len(report.Images), len(data), r.UserAgent())
 		reply(200, map[string]any{"images": results})
+	})
+	mux.HandleFunc("POST /api/v1/collector/lockfiles", func(w http.ResponseWriter, r *http.Request) {
+		reply := func(status int, v any) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(v)
+		}
+		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+			log.Printf("lockfile report rejected: 401")
+			reply(401, map[string]any{"error": map[string]string{"code": "UNAUTHENTICATED", "message": "Invalid token"}})
+			return
+		}
+		if r.Header.Get("Content-Type") != "application/vnd.smoke.lockfile-report+json" || r.Header.Get("Content-Encoding") != "gzip" {
+			log.Printf("lockfile report rejected: 415")
+			reply(415, map[string]any{"error": map[string]string{"code": "UNSUPPORTED_MEDIA_TYPE", "message": "bad content type"}})
+			return
+		}
+		zr, err := gzip.NewReader(r.Body)
+		if err != nil {
+			reply(400, map[string]any{"error": map[string]string{"code": "BAD_REQUEST", "message": "bad gzip"}})
+			return
+		}
+		data, err := io.ReadAll(io.LimitReader(zr, 10*maxBody+1))
+		var report struct {
+			Lockfiles []struct {
+				Path   string `json:"path"`
+				Status string `json:"status"`
+			} `json:"lockfiles"`
+		}
+		if err != nil || len(data) > 10*maxBody || json.Unmarshal(data, &report) != nil || report.Lockfiles == nil {
+			reply(400, map[string]any{"error": map[string]string{"code": "VALIDATION_FAILED", "message": "bad report"}})
+			return
+		}
+		if *saveLockfiles != "" {
+			_ = os.WriteFile(*saveLockfiles, data, 0o600)
+		}
+		results := []map[string]any{}
+		for _, l := range report.Lockfiles {
+			res := map[string]any{"path": l.Path, "status": l.Status, "result": "skipped", "assetId": nil,
+				"snapshotId": nil, "issue": nil, "files": []any{}}
+			if l.Status == "ok" {
+				res["result"], res["assetId"], res["snapshotId"] = "created", "asset-l", "snap-l"
+			}
+			results = append(results, res)
+		}
+		//nolint:gosec // header values are %q-quoted; test server only
+		log.Printf("lockfile report accepted: %d paths, %d bytes scans=%q ua=%q", len(report.Lockfiles), len(data),
+			r.Header.Get("X-Smoke-Collector-Scans"), r.UserAgent())
+		reply(200, map[string]any{"lockfiles": results})
 	})
 	if *dockerSocket != "" {
 		go serveDocker(*dockerSocket, *dockerGroup)

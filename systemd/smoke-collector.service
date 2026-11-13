@@ -1,5 +1,5 @@
 [Unit]
-Description=Smoke collector: upload the OS package inventory to Smoke
+Description=Smoke collector: upload the OS package inventory and/or application lockfiles to Smoke
 Documentation=https://gitlab.aircraft.tw/smoke/smoke-collector
 Wants=network-online.target
 After=network-online.target
@@ -12,6 +12,8 @@ ExecStart=/usr/local/bin/smoke-collector run
 TimeoutStartSec=15min
 NoNewPrivileges=yes
 ProtectSystem=strict
+# Lockfile paths under /home, /root or /run/user: install.sh adds the drop-in
+# smoke-collector.service.d/lockfiles.conf (ProtectHome=tmpfs plus BindReadOnlyPaths= per path).
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes

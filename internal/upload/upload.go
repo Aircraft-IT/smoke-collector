@@ -41,6 +41,8 @@ type Client struct {
 	// Version and UserAgent are sent as X-Smoke-Collector-Version and User-Agent.
 	Version   string
 	UserAgent string
+	// Scans is sent as X-Smoke-Collector-Scans when set (smoke-collector: "os,lockfiles").
+	Scans string
 	// ContentType of the body; empty means the `#smoke-host 1` text (text/plain; charset=utf-8).
 	ContentType string
 	// Hints replace the default hints of RejectedError for some status codes (may be nil).
@@ -218,6 +220,9 @@ func (c *Client) once(ctx context.Context, gz []byte) (*Result, time.Duration, e
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.UserAgent)
 	req.Header.Set("X-Smoke-Collector-Version", c.Version)
+	if c.Scans != "" {
+		req.Header.Set("X-Smoke-Collector-Scans", c.Scans)
+	}
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
