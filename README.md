@@ -452,8 +452,8 @@ Each release, from a clean checkout of the commit to release (the Go version you
 recorded in the binaries and in the release notes):
 
 ```sh
+git tag -a v0.4.1 -m "smoke-collector 0.4.1: <summary>"   # first: Go records it in the binaries
 SMOKE_REGISTRY=registry.example.com scripts/release.sh 0.4.1
-git tag -a v0.4.1 -m "smoke-collector 0.4.1: <summary>"
 git push origin main v0.4.1                  # the development repository
 scripts/publish-github.sh 0.4.1 --dry-run    # checks, prints the release notes
 scripts/publish-github.sh 0.4.1              # GitHub: main, the tag and the release

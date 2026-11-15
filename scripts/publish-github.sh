@@ -6,8 +6,8 @@
 # Checks first, changes nothing until all pass:
 #   - tag v<version> exists and dist/v<version> holds the four binaries, SHA256SUMS and its
 #     minisign signature, the files match SHA256SUMS and the signature verifies;
-#   - every binary records the tag's commit with no local changes (go version -m), so the
-#     published source is the source of the published files.
+#   - every binary records the tag's commit with no local changes and the module version
+#     v<version> (go version -m), so the published source is the source of the published files.
 # Then pushes the tag's commit to GitHub's main (fast-forward only, never forced) and the tag, and
 # creates the GitHub release with the files and notes naming the commit and the Go version.
 # Development stays in the internal repository; GitHub only gets released commits.
@@ -62,6 +62,8 @@ for f in $files; do
 	mod=$(printf '%s\n' "$info" | awk '$2 ~ /^vcs.modified=/ { sub(/^vcs.modified=/, "", $2); print $2 }')
 	[ "$rev" = "$commit" ] || die "$f was built from ${rev:-an unknown commit}, not v$VERSION ($commit)"
 	[ "$mod" = false ] || die "$f was built from a tree with changes (vcs.modified=$mod)"
+	modver=$(printf '%s\n' "$info" | awk '$1 == "mod" { print $3 }')
+	[ "$modver" = "v$VERSION" ] || die "$f records module version $modver, not v$VERSION (built before tagging?)"
 	gover=$(printf '%s\n' "$info" | sed -n '1s/.*: //p')
 done
 
