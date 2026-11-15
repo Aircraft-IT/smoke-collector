@@ -69,7 +69,8 @@ func (e *engine) start(t *testing.T) string {
 			io.WriteString(w, `[{"Id":"`+cid+`","Names":["/billing-db"],"Image":"redis:7-alpine","ImageID":"`+iid+`",`+
 				`"Command":"redis-server --requirepass hunter2","Labels":{"com.acme.secret":"x"},"Ports":[{"PublicPort":6379}]}]`)
 		case "/v1.41/images/" + iid + "/json":
-			io.WriteString(w, `{"Id":"`+iid+`","RepoTags":["redis:7-alpine"],"RepoDigests":["redis@sha256:`+strings.Repeat("d", 64)+`"]}`)
+			io.WriteString(w, `{"Id":"`+iid+`","RepoTags":["redis:7-alpine"],"RepoDigests":["redis@sha256:`+strings.Repeat("d", 64)+`"],`+
+				`"Config":{"Labels":{"org.opencontainers.image.title":"Redis","com.acme.secret":"hunter2"}}}`)
 		case "/v1.41/containers/" + cid + "/archive":
 			if b, ok := files[r.URL.Query().Get("path")]; ok {
 				w.Write(b)
@@ -128,7 +129,7 @@ func TestDryRunPrintsTheReport(t *testing.T) {
 		t.Fatalf("code %d uploads %d stderr %s", code, h.uploads, h.stderr.String())
 	}
 	want := `{"images":[{"reference":"redis:7-alpine","imageId":"` + iid + `","repoDigest":"sha256:` + strings.Repeat("d", 64) +
-		`","containers":1,"status":"ok","inventory":"#smoke-host 1\n#os-release\nID=alpine\nVERSION_ID=3.21.2\n#packages apk\nmusl-1.2.5-r8 x86_64 {musl} (MIT) [installed]\n"}]}` + "\n"
+		`","containers":1,"status":"ok","inventory":"#smoke-host 1\n#os-release\nID=alpine\nVERSION_ID=3.21.2\n#packages apk\nmusl-1.2.5-r8 x86_64 {musl} (MIT) [installed]\n","labels":{"org.opencontainers.image.title":"Redis"}}]}` + "\n"
 	if h.stdout.String() != want {
 		t.Errorf("dry run:\n%s\nwant\n%s", h.stdout.String(), want)
 	}

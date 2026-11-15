@@ -299,7 +299,7 @@ check "the report: the symlinked release read, unreadable paths reported, .env n
 	grep -qF "\"path\":\"/srv/billing/current\",\"status\":\"ok\",\"files\":[{\"name\":\"package-lock.json\"" /tmp/last-lockfiles.json &&
 	grep -qF "\"path\":\"/home/app/shop\",\"status\":\"unreadable\"" /tmp/last-lockfiles.json &&
 	grep -qF "\"path\":\"/srv/closed\",\"status\":\"unreadable\"" /tmp/last-lockfiles.json && ! grep -q never-sent /tmp/last-lockfiles.json'
-check "terms record: version 2026-11-13.2, scans=lockfiles" sh -c 'grep -qx "terms_version=2026-11-13.2" /etc/smoke-collector/terms-accepted &&
+check "terms record: version 2026-11-15.1, scans=lockfiles" sh -c 'grep -qx "terms_version=2026-11-15.1" /etc/smoke-collector/terms-accepted &&
 	grep -qx "scans=lockfiles" /etc/smoke-collector/terms-accepted'
 expect 0 "scan:          lockfiles (config file)" "print-config shows the scan" runas "/usr/local/bin/smoke-collector print-config --insecure-http"
 grep -qx "lockfile:      /srv/billing/current" /tmp/out && ok "  ...and the lockfile paths" || bad "  ...lockfile paths"
@@ -333,7 +333,7 @@ check "  ...config scan=os without lockfile lines" sh -c 'grep -qx "scan=os" /et
 sed -i -e 's/^terms_version=.*/terms_version=2026-11-13/' -e '/^scans=/d' /etc/smoke-collector/terms-accepted
 expect 1 "terms must be accepted first" "terms of an older version are asked again on upgrade" pipe_install $sigflag --no-run
 expect 0 "accepted with --accept-terms" "  ...and accepted with --yes" pipe_install $sigflag --no-run --yes
-check "  ...record updated" sh -c 'grep -qx "terms_version=2026-11-13.2" /etc/smoke-collector/terms-accepted && grep -qx "scans=os" /etc/smoke-collector/terms-accepted'
+check "  ...record updated" sh -c 'grep -qx "terms_version=2026-11-15.1" /etc/smoke-collector/terms-accepted && grep -qx "scans=os" /etc/smoke-collector/terms-accepted'
 expect 0 "removed" "--uninstall" sh /repo/install.sh --uninstall
 
 # The terms list only the chosen items.
@@ -397,7 +397,7 @@ fi
 check "  ...each configuration has its own token" sh -c "grep -qx 'token=$TOKEN' /etc/smoke-collector/config && grep -qx 'token=$CTOKEN' /etc/smoke-collector/containers.config"
 check "  ...two terms records: scans=os and scans=docker" sh -c 'grep -qx "scans=os" /etc/smoke-collector/terms-accepted &&
 	grep -qx "scans=docker" /etc/smoke-collector/containers.terms-accepted &&
-	grep -qx "terms_version=2026-11-13.2" /etc/smoke-collector/containers.terms-accepted'
+	grep -qx "terms_version=2026-11-15.1" /etc/smoke-collector/containers.terms-accepted'
 check "  ...shared dir 0751, smoke-container in the docker group" sh -c '[ "$(stat -c %a /etc/smoke-collector)" = 751 ] &&
 	id -nG smoke-container | tr " " "\n" | grep -qx docker && ! id -nG smoke-collector | tr " " "\n" | grep -qx docker'
 grep -q "container report accepted: 1 images" /tmp/fakesmoke4.log && grep -q 'report created: .* scans="os"' /tmp/fakesmoke4.log &&

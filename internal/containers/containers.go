@@ -55,7 +55,24 @@ type Image struct {
 	Containers int     `json:"containers"`
 	Status     string  `json:"status"`
 	Inventory  string  `json:"inventory,omitempty"`
+	// Labels holds only LabelKeys, so Smoke can tell the public image it is built from (FR-COL-17).
+	// Always sent (possibly empty), so Smoke can tell a collector that reads labels from one that
+	// does not.
+	Labels map[string]string `json:"labels"`
 }
+
+// LabelKeys are the only image labels reported: the OCI annotations naming where the image
+// comes from. Other labels can hold anything (credentials, internal names, the authors' e-mail
+// addresses) and are never read.
+var LabelKeys = []string{
+	"org.opencontainers.image.source",
+	"org.opencontainers.image.title",
+	"org.opencontainers.image.version",
+	"org.opencontainers.image.base.name",
+}
+
+// maxLabelValue bounds each reported label value.
+const maxLabelValue = 256
 
 // Report is the request body.
 type Report struct {
@@ -140,6 +157,7 @@ func (c *Collector) Collect(ctx context.Context) (*Report, error) {
 		}
 		img.Reference = reference(g.containers[0].Image, inspect)
 		img.RepoDigest = repoDigest(img.Reference, inspect)
+		img.Labels = labels(inspect)
 		switch {
 		case img.Reference == nil:
 			img.Status = StatusUntagged
@@ -331,6 +349,32 @@ func reference(containerImage string, img *docker.Image) *string {
 		}
 	}
 	return nil
+}
+
+// labels keeps the LabelKeys of an image whose value is printable ASCII of at most
+// maxLabelValue bytes; anything else is left out.
+func labels(img *docker.Image) map[string]string {
+	out := map[string]string{}
+	if img == nil || img.Config == nil {
+		return out
+	}
+	for _, k := range LabelKeys {
+		v, ok := img.Config.Labels[k]
+		if !ok || v == "" || len(v) > maxLabelValue {
+			continue
+		}
+		printable := true
+		for i := 0; i < len(v); i++ {
+			if v[i] < ' ' || v[i] > '~' {
+				printable = false
+				break
+			}
+		}
+		if printable {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // validRef rejects names that cannot be an image reference (spaces, control characters, too long).
