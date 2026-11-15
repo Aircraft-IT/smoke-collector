@@ -8,7 +8,7 @@ import (
 )
 
 // Version is the collector version (semver, OS detection plan §5.1).
-var Version = "0.4.1-dev"
+var Version = "0.4.1"
 
 // valid is the backend's X-Smoke-Collector-Version rule (plan §5.2).
 var valid = regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$`)
