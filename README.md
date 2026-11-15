@@ -8,13 +8,19 @@ Docker containers (see [Container collector](#container-collector)). It is a sin
 binary that runs as an unprivileged user from a systemd timer (or cron) and exits when it is done.
 It does not stay running, update itself or listen on any port.
 
-## Specification
+## Source and releases
 
-The design is in the smoke-docs repository:
-[OS-DETECTION-PLAN.zh-TW.md](https://gitlab.aircraft.tw/smoke/smoke-docs/-/blob/main/plan/OS-DETECTION-PLAN.zh-TW.md)
-(§2 for the data and the `#smoke-host 1` format, §5.1 for the collector, §5.2 for the upload API,
-§5.4 for installation and releases, §4a for the container collector, §4b for lockfiles and
-`--scan`). Change the plan first, then this repository.
+This repository is published at <https://github.com/aircraft-it/smoke-collector> when a version
+is released: each release is a tag on `main` and a
+[GitHub release](https://github.com/aircraft-it/smoke-collector/releases) with the binaries,
+`SHA256SUMS` and its minisign signature. Development happens in Smoke's own repository, so
+`main` here moves only at releases. This README describes what the collector reads and sends;
+Smoke's design notes (the `#smoke-host 1` format, the upload API, installation and releases) are
+not public.
+
+Issues are welcome. Pull requests are not merged directly; a change we take is made in the
+development repository and appears here with the next release. Contributions are under the
+Apache License 2.0, like the rest of the repository.
 
 ## What it collects
 
@@ -176,6 +182,47 @@ With [minisign](https://jedisct1.github.io/minisign/) and the public key from
 minisign -Vm SHA256SUMS -P <public key>
 sha256sum -c --ignore-missing SHA256SUMS
 ```
+
+### Which source a binary was built from
+
+Every binary records the commit it was built from and the Go version (from 0.4.1 that commit is
+the release tag on GitHub):
+
+```sh
+go version -m smoke-collector_linux_amd64
+# smoke-collector_linux_amd64: go1.27.3
+#   build  vcs.revision=<commit of tag v<version>>
+#   build  vcs.modified=false
+```
+
+`SHA256SUMS` is signed, so a matching checksum ties the file you run to that commit. To check it
+yourself, rebuild the release from a clean clone with the same Go version and compare:
+
+```sh
+git clone https://github.com/aircraft-it/smoke-collector && cd smoke-collector
+git checkout v0.4.1
+GOTOOLCHAIN=go1.27.3 scripts/reproduce.sh 0.4.1 /path/to/SHA256SUMS
+```
+
+`reproduce.sh` builds with the same commands as the release (`scripts/build.sh`) and reports
+`match` for each of the four binaries, or which ones differ.
+
+### Versions before 0.4.1
+
+0.1.0 to 0.4.0 were built before the repository was published. Its history was then rewritten
+once to drop tool-generated lines from commit messages; the source of every commit is unchanged,
+but the commit ids changed. The binaries of these versions therefore record the old commit
+(`vcs.revision`), which is not in the public history, and cannot be rebuilt bit for bit from it.
+The tags here hold the same source:
+
+| Version | Commit recorded in the binaries | Tag on GitHub |
+| --- | --- | --- |
+| 0.1.0 | `9c3ba51ab992756683bccbe31c5a6066d26c1f85` | `e1c6c7ea18ec3ccb8ae4976446b886dc3e3acffb` |
+| 0.2.0 | `3b509e90cc5cd27412119b42796054c1357aabba` | `a56d635935c5a0b88099585c9a1b5749ca7c9a18` |
+| 0.2.1 | `af50cb8dfe60cc80a4110b53fad4db7693132da3` | `e3fbf396a5d02f903bc93d0814ee2f674acbdd2d` |
+| 0.3.0 | `c9ddfc417e4ca62b4b0e3a2330e4ac98ca29ee07` | `6c19bbe49fcebaca1a8d2360223b55aa34783879` |
+| 0.3.1 | `9355d6c6b839969c7d1d2db182dce2ef7dc50b60` | `bf3b62ec8c0ae312d794c2d17443d88636ca4c37` |
+| 0.4.0 | `7d933b6dbba53212c4a03a4f627157655b36e480` | `bb812f38dd82b291936a7a05886d5c8c71a531c1` |
 
 ### Replacing a token
 
@@ -401,11 +448,23 @@ One-time key generation:
 minisign -G -p ~/.minisign/smoke-collector.pub -s ~/.minisign/smoke-collector.key
 ```
 
-Each release:
+Each release, from a clean checkout of the commit to release (the Go version you build with is
+recorded in the binaries and in the release notes):
 
 ```sh
-SMOKE_REGISTRY=registry.example.com scripts/release.sh 0.3.0
+SMOKE_REGISTRY=registry.example.com scripts/release.sh 0.4.1
+git tag -a v0.4.1 -m "smoke-collector 0.4.1: <summary>"
+git push origin main v0.4.1                  # the development repository
+scripts/publish-github.sh 0.4.1 --dry-run    # checks, prints the release notes
+scripts/publish-github.sh 0.4.1              # GitHub: main, the tag and the release
 ```
+
+`publish-github.sh` first checks that the files match the signed `SHA256SUMS` and that every
+binary records the tag's commit with no local changes; then it pushes that commit to GitHub's
+`main` (fast-forward only) with the tag, and creates the GitHub release with the binaries,
+`SHA256SUMS`, `SHA256SUMS.minisig`, `install.sh` and `smoke-collector.pub`. It needs `gh` logged in
+to an account that can write to the repository (`GITHUB_REPO`, default
+`Aircraft-IT/smoke-collector`). Commit messages here are published as they are.
 
 This builds `smoke-collector` and `smoke-container-collector` for amd64 and arm64 with the
 version stamped in, writes `SHA256SUMS`, and signs it with

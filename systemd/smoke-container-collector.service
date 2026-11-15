@@ -1,6 +1,6 @@
 [Unit]
 Description=Smoke container collector: report running Docker images and their packages to Smoke
-Documentation=https://gitlab.aircraft.tw/smoke/smoke-collector
+Documentation=https://github.com/aircraft-it/smoke-collector
 Wants=network-online.target
 After=network-online.target docker.service
 

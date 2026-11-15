@@ -16,8 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"gitlab.aircraft.tw/smoke/smoke-collector/internal/containers"
-	"gitlab.aircraft.tw/smoke/smoke-collector/internal/docker"
+	"github.com/aircraft-it/smoke-collector/internal/containers"
+	"github.com/aircraft-it/smoke-collector/internal/docker"
 )
 
 // only lists the given containers instead of asking the Engine for all of them.

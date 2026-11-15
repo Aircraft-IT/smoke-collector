@@ -1484,7 +1484,7 @@ install_systemd() {
 	cat >"$UNIT_DIR/smoke-collector.service" <<'SERVICE'
 [Unit]
 Description=Smoke collector: upload the OS package inventory and/or application lockfiles to Smoke
-Documentation=https://gitlab.aircraft.tw/smoke/smoke-collector
+Documentation=https://github.com/aircraft-it/smoke-collector
 Wants=network-online.target
 After=network-online.target
 
@@ -1542,7 +1542,7 @@ install_container_units() {
 	cat >"$UNIT_DIR/smoke-container-collector.service" <<'CONTAINER_SERVICE'
 [Unit]
 Description=Smoke container collector: report running Docker images and their packages to Smoke
-Documentation=https://gitlab.aircraft.tw/smoke/smoke-collector
+Documentation=https://github.com/aircraft-it/smoke-collector
 Wants=network-online.target
 After=network-online.target docker.service
 

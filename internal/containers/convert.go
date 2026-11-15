@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"gitlab.aircraft.tw/smoke/smoke-collector/internal/collect"
+	"github.com/aircraft-it/smoke-collector/internal/collect"
 )
 
 // stanzas splits a dpkg status or apk installed database into paragraphs of "Field: value" (dpkg)

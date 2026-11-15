@@ -12,6 +12,10 @@
 # 4. builds the image $SMOKE_REGISTRY/smoke/smoke-collector/dist:<version> (Dockerfile.dist) and
 #    pushes it.
 #
+# The binaries come from scripts/build.sh, which reproduce.sh also uses. Then tag the commit
+# (git tag -a v<version>), push it to the internal repository and run
+# scripts/publish-github.sh <version> to publish the source and the release on GitHub.
+#
 # The download tree is left in $DIST_DIR (default ./dist), laid out like /downloads/collector/:
 #   install.sh  LATEST  smoke-collector.pub  v<version>/{smoke-collector_linux_amd64,
 #   smoke-collector_linux_arm64, smoke-container-collector_linux_amd64,
@@ -62,22 +66,12 @@ if [ "$ALLOW_DIRTY" = 0 ] && command -v git >/dev/null && git rev-parse --git-di
 	[ -z "$(git status --porcelain 2>/dev/null)" ] || die "the working tree has changes (commit them, or pass --allow-dirty)"
 fi
 
-if command -v sha256sum >/dev/null; then sha() { sha256sum "$@"; }; else sha() { shasum -a 256 "$@"; }; fi
-
 rel="$DIST/v$VERSION"
 rm -rf "$DIST"
 mkdir -p "$rel"
 
-echo "release: building $VERSION"
-for prog in smoke-collector smoke-container-collector; do
-	for arch in amd64 arm64; do
-		CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
-			-ldflags "-s -w -X gitlab.aircraft.tw/smoke/smoke-collector/internal/version.Version=$VERSION" \
-			-o "$rel/${prog}_linux_$arch" "./cmd/$prog"
-	done
-done
-(cd "$rel" && sha smoke-collector_linux_amd64 smoke-collector_linux_arm64 \
-	smoke-container-collector_linux_amd64 smoke-container-collector_linux_arm64 >SHA256SUMS)
+echo "release: building $VERSION ($(go env GOVERSION))"
+sh scripts/build.sh "$VERSION" "$rel"
 
 echo "release: signing SHA256SUMS (minisign -S -l)"
 minisign -S -l -s "$SECRET" -m "$rel/SHA256SUMS" -x "$rel/SHA256SUMS.minisig" \

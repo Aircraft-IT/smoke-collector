@@ -28,11 +28,11 @@ import (
 	"runtime"
 	"syscall"
 
-	"gitlab.aircraft.tw/smoke/smoke-collector/internal/config"
-	"gitlab.aircraft.tw/smoke/smoke-collector/internal/containers"
-	"gitlab.aircraft.tw/smoke/smoke-collector/internal/docker"
-	"gitlab.aircraft.tw/smoke/smoke-collector/internal/upload"
-	"gitlab.aircraft.tw/smoke/smoke-collector/internal/version"
+	"github.com/aircraft-it/smoke-collector/internal/config"
+	"github.com/aircraft-it/smoke-collector/internal/containers"
+	"github.com/aircraft-it/smoke-collector/internal/docker"
+	"github.com/aircraft-it/smoke-collector/internal/upload"
+	"github.com/aircraft-it/smoke-collector/internal/version"
 )
 
 const program = "smoke-container-collector"
