@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"gitlab.aircraft.tw/smoke/smoke-collector/internal/docker"
+	"github.com/aircraft-it/smoke-collector/internal/docker"
 )
 
 func id64(c byte) string  { return strings.Repeat(string(c), 64) }

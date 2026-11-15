@@ -1,6 +1,6 @@
 [Unit]
 Description=Smoke collector: upload the OS package inventory and/or application lockfiles to Smoke
-Documentation=https://gitlab.aircraft.tw/smoke/smoke-collector
+Documentation=https://github.com/aircraft-it/smoke-collector
 Wants=network-online.target
 After=network-online.target
 

@@ -1,4 +1,4 @@
-module gitlab.aircraft.tw/smoke/smoke-collector
+module github.com/aircraft-it/smoke-collector
 
 go 1.27.3
 

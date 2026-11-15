@@ -30,11 +30,11 @@ import (
 	"strings"
 	"syscall"
 
-	"gitlab.aircraft.tw/smoke/smoke-collector/internal/collect"
-	"gitlab.aircraft.tw/smoke/smoke-collector/internal/config"
-	"gitlab.aircraft.tw/smoke/smoke-collector/internal/lockfiles"
-	"gitlab.aircraft.tw/smoke/smoke-collector/internal/upload"
-	"gitlab.aircraft.tw/smoke/smoke-collector/internal/version"
+	"github.com/aircraft-it/smoke-collector/internal/collect"
+	"github.com/aircraft-it/smoke-collector/internal/config"
+	"github.com/aircraft-it/smoke-collector/internal/lockfiles"
+	"github.com/aircraft-it/smoke-collector/internal/upload"
+	"github.com/aircraft-it/smoke-collector/internal/version"
 )
 
 // Exit codes (plan §5.1).

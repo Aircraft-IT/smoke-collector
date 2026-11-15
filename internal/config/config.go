@@ -23,7 +23,7 @@ import (
 	"slices"
 	"strings"
 
-	"gitlab.aircraft.tw/smoke/smoke-collector/internal/lockfiles"
+	"github.com/aircraft-it/smoke-collector/internal/lockfiles"
 )
 
 const (

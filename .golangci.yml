@@ -35,4 +35,4 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - gitlab.aircraft.tw/smoke/smoke-collector
+        - github.com/aircraft-it/smoke-collector

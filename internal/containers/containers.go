@@ -20,8 +20,8 @@ import (
 	"sort"
 	"strings"
 
-	"gitlab.aircraft.tw/smoke/smoke-collector/internal/collect"
-	"gitlab.aircraft.tw/smoke/smoke-collector/internal/docker"
+	"github.com/aircraft-it/smoke-collector/internal/collect"
+	"github.com/aircraft-it/smoke-collector/internal/docker"
 )
 
 // Statuses of an image in the report.
