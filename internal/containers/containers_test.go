@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -339,5 +340,40 @@ func TestRepository(t *testing.T) {
 		if got := repository(in); got != want {
 			t.Errorf("repository(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestLabels(t *testing.T) {
+	long := strings.Repeat("x", maxLabelValue+1)
+	img := &docker.Image{Config: &docker.ImageConfig{Labels: map[string]string{
+		"org.opencontainers.image.source":        "https://github.com/gotenberg/gotenberg",
+		"org.opencontainers.image.title":         "Gotenberg",
+		"org.opencontainers.image.version":       "8.34.0",
+		"org.opencontainers.image.authors":       "Someone <someone@example.com>",
+		"org.opencontainers.image.documentation": "https://gotenberg.dev",
+		"com.acme.secret":                        "hunter2",
+		"org.opencontainers.image.base.name":     long,
+	}}}
+	got := labels(img)
+	want := map[string]string{
+		"org.opencontainers.image.source":  "https://github.com/gotenberg/gotenberg",
+		"org.opencontainers.image.title":   "Gotenberg",
+		"org.opencontainers.image.version": "8.34.0",
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("labels = %v, want %v", got, want)
+	}
+	ctrl := &docker.Image{Config: &docker.ImageConfig{Labels: map[string]string{
+		"org.opencontainers.image.title": "a\nb", "org.opencontainers.image.version": "ünï",
+	}}}
+	for _, i := range []*docker.Image{nil, {}, ctrl} {
+		if l := labels(i); l == nil || len(l) != 0 {
+			t.Errorf("labels(%+v) = %v, want empty", i, l)
+		}
+	}
+	// The report always carries the field, so Smoke can tell this collector reads labels.
+	b, _ := json.Marshal(Image{ImageID: imgID('1'), Labels: labels(nil)})
+	if !strings.Contains(string(b), `"labels":{}`) {
+		t.Errorf("report: %s", b)
 	}
 }

@@ -239,9 +239,16 @@ func (c *Client) Containers(ctx context.Context) ([]Container, error) {
 
 // Image is the part of GET /images/{id}/json that is used.
 type Image struct {
-	ID          string   `json:"Id"`
-	RepoTags    []string `json:"RepoTags"`
-	RepoDigests []string `json:"RepoDigests"`
+	ID          string       `json:"Id"`
+	RepoTags    []string     `json:"RepoTags"`
+	RepoDigests []string     `json:"RepoDigests"`
+	Config      *ImageConfig `json:"Config"`
+}
+
+// ImageConfig is the part of an image's configuration that is used: its labels (the collector
+// keeps only the standard ones in containers.LabelKeys).
+type ImageConfig struct {
+	Labels map[string]string `json:"Labels"`
 }
 
 // Image inspects an image by its ID (sha256:<64 hex>).

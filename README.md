@@ -112,7 +112,8 @@ With `os` or `lockfiles` in it, `--scan` replaces `smoke-collector`'s scan list,
    program writes its acceptance (version, `scans=`, time, how, `SUDO_USER`) to
    `/etc/smoke-collector/terms-accepted` or `containers.terms-accepted`. A later run asks again
    only when `TERMS_VERSION` in `install.sh` changes (0.3.0: `2026-11-13.2`, which adds the
-   lockfile section, so every host is asked once more) or an item is chosen that the record does
+   lockfile section; 0.4.0: `2026-11-15.1`, which adds the image labels the container collector
+   sends; each time every host is asked once more) or an item is chosen that the record does
    not cover. Without a terminal, read them with `--show-terms --scan LIST` and accept with
    `--accept-terms`;
 1. downloads `LATEST`, the binaries for the host architecture (`amd64` or `arm64`), `SHA256SUMS`
@@ -473,7 +474,7 @@ program before it is sent ([internal/docker](internal/docker/docker.go), unit-te
 | --- | --- |
 | `GET /version` | the Engine is reachable and new enough |
 | `GET /containers/json` | the running containers (ID, image, image ID are used) |
-| `GET /images/sha256:<id>/json` | tags and repo digests of each image |
+| `GET /images/sha256:<id>/json` | tags, repo digests and four standard labels of each image |
 | `GET /containers/<id>/archive?path=<file>` | what `docker cp` reads, for the files below |
 
 For each distinct image it reads, from one of its running containers, only `/etc/os-release`
@@ -487,7 +488,7 @@ program.
 
 | Sent | Read but not sent | Never read |
 | --- | --- | --- |
-| image reference (registry, repository, tag), image ID, repo digest, number of running containers; distribution and package list inside the image | container names, labels, ports, mounts and commands in the `/containers/json` response (used only to pick a container) | environment variables (container inspect is never called), volumes, logs, image layers, any other file |
+| image reference (registry, repository, tag), image ID, repo digest, number of running containers; distribution and package list inside the image; the image labels `org.opencontainers.image.source`, `.title`, `.version` and `.base.name` (0.4.0+, printable ASCII up to 256 bytes each) | container names, labels, ports, mounts and commands in the `/containers/json` response (used only to pick a container); every other image label and the rest of the image configuration | environment variables (container inspect is never called), volumes, logs, image layers, any other file |
 
 Image statuses: `ok` (with the inventory), `untagged` (no name: not read), `unsupported` (rpm
 database, or a distribution Smoke does not support), `no_packages` (no package database, or the
@@ -499,7 +500,7 @@ application/vnd.smoke.container-report+json`, `Content-Encoding: gzip`, `User-Ag
 smoke-container-collector/<version> (linux/<arch>)`, a body like
 
 ```json
-{"images":[{"reference":"nginx:1.27","imageId":"sha256:…","repoDigest":"sha256:…","containers":2,"status":"ok","inventory":"#smoke-host 1\n…"}]}
+{"images":[{"reference":"gotenberg/gotenberg:8","imageId":"sha256:…","repoDigest":"sha256:…","containers":2,"status":"ok","inventory":"#smoke-host 1\n…","labels":{"org.opencontainers.image.source":"https://github.com/gotenberg/gotenberg","org.opencontainers.image.version":"8.34.0"}}]}
 ```
 
 An empty list is still sent when nothing runs (Smoke then removes the deployment links).

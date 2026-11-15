@@ -364,7 +364,7 @@ new_workdir() {
 
 # The version of the terms below. Change it whenever their text changes in substance: hosts that
 # accepted an older version are asked again on their next install or upgrade.
-TERMS_VERSION=2026-11-13.2
+TERMS_VERSION=2026-11-15.1
 
 case ${LANG_OPT:-} in
 '' | zh-TW | zh_TW | zh | en) ;;
@@ -513,9 +513,11 @@ EOF
 		cat <<EOF
   Docker 容器（smoke-container-collector）：
   1. 每個執行中映像檔的名稱與標籤、映像檔 ID、digest、使用它的容器數量；
-  2. 映像檔的作業系統識別與已安裝套件清單（名稱、版本、架構、來源套件）。
-  不會傳送容器名稱、環境變數、標籤（labels）、掛載、網路設定、日誌或其他
-  檔案內容。
+  2. 映像檔的作業系統識別與已安裝套件清單（名稱、版本、架構、來源套件）；
+  3. 映像檔的四個標準出處標籤（org.opencontainers.image 的 source、title、
+     version、base.name），讓 Smoke 判斷它是從哪個公開映像檔建的。
+  不會傳送其他標籤（labels）、容器名稱、環境變數、掛載、網路設定、日誌或
+  其他檔案內容。
 EOF
 	fi
 	echo "  每次也會傳送收集程式的版本、CPU 架構和掃描項目。"
@@ -715,9 +717,12 @@ EOF
    a. for each running image: its name and tag, image ID, digest and the
       number of containers using it;
    b. the image's operating system and installed packages (name, version,
-      architecture, source package).
-   It never sends container names, environment variables, labels, mounts,
-   network settings, logs or other file contents.
+      architecture, source package);
+   c. four standard labels of the image saying where it comes from
+      (org.opencontainers.image source, title, version and base.name), so
+      Smoke can tell which public image it is built from.
+   It never sends other labels, container names, environment variables,
+   mounts, network settings, logs or other file contents.
 EOF
 	fi
 	cat <<EOF
