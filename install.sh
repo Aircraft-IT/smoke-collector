@@ -37,7 +37,7 @@
 #   --url URL            Smoke address (https://). Required unless --uninstall.
 #   --scan LIST          what to scan: os, lockfiles, docker (comma-separated).
 #   --lockfile PATH      with lockfiles: an absolute directory (only the supported lockfile names
-#                        directly inside it are read) or lockfile. Repeatable, at most 20; letters,
+#                        directly inside it are read) or lockfile. Repeatable, at most 50; letters,
 #                        digits and . _ - / @ + only. The paths given replace the configured ones;
 #                        --lockfile none clears them. Without it, an upgrade keeps them. Paths
 #                        under /home, /root or /run/user get a systemd drop-in that makes them
@@ -95,7 +95,7 @@ UNIT_DIR=/etc/systemd/system
 DROPIN_DIR=$UNIT_DIR/smoke-collector.service.d
 DROPIN=$DROPIN_DIR/lockfiles.conf
 DEFAULT_DOCKER_HOST=unix:///var/run/docker.sock
-MAX_LOCKFILES=20
+MAX_LOCKFILES=50
 
 URL=""
 TOKEN_FILE=""
@@ -1343,7 +1343,7 @@ install_program() {
 				echo "# SMOKE_CONTAINER_COLLECTOR_URL / _TOKEN / _DOCKER_HOST override."
 			else
 				echo "# smoke-collector configuration, written by install.sh. Mode 0640 root:$GROUP."
-				echo "# Keys: url, token (or token_file), scan (os, lockfiles), lockfile (repeatable, at most 20)."
+				echo "# Keys: url, token (or token_file), scan (os, lockfiles), lockfile (repeatable, at most 200; the first 50 are read)."
 				echo "# SMOKE_COLLECTOR_URL / SMOKE_COLLECTOR_TOKEN override url and token."
 			fi
 			printf 'url=%s\n' "$URL"
