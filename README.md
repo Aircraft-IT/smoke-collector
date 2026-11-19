@@ -146,7 +146,7 @@ With `os` or `lockfiles` in it, `--scan` replaces `smoke-collector`'s scan list,
 | --- | --- |
 | `--url URL` | Smoke address (`https://` only). |
 | `--scan LIST` | What to scan: `os`, `lockfiles`, `docker` (see above). |
-| `--lockfile PATH` | With `lockfiles`: an absolute directory or lockfile path. Repeatable, at most 20; letters, digits and `. _ - / @ +` only (edit the configuration by hand for others). The paths given replace the configured ones; `--lockfile none` clears them. Without it, an upgrade keeps the configured paths. With `lockfiles` and no path at all, `install.sh` asks at the terminal, or stops without one. |
+| `--lockfile PATH` | With `lockfiles`: an absolute directory or lockfile path. Repeatable, at most 50; letters, digits and `. _ - / @ +` only (edit the configuration by hand for others). The paths given replace the configured ones; `--lockfile none` clears them. Without it, an upgrade keeps the configured paths. With `lockfiles` and no path at all, `install.sh` asks at the terminal, or stops without one. |
 | `--token-file FILE` | Read `smoke-collector`'s token from FILE (with only `docker` chosen: the container collector's). Without it, a reinstall or upgrade keeps the existing token. |
 | `--containers-token-file FILE` | Read the container collector's token from FILE. |
 | `--replace-token` | (0.3.1+) Replace the token of each program this run installs that already has one: ask for the new token at the terminal (or read it from the token file). Smoke revokes the program's older token on this host after the new one's first successful report. |
@@ -299,7 +299,7 @@ lockfile=/home/app/shop/package-lock.json
 | `url` | The Smoke address. |
 | `token` / `token_file` | The asset token, or a file holding it (one of the two). |
 | `scan` | Comma-separated subset of `os`, `lockfiles`, non-empty; not repeatable. Missing means `os` (0.2.x configurations keep working). `docker` is refused: the container collector scans Docker. |
-| `lockfile` | Repeatable, at most 20. An absolute, clean path (a trailing `/` is removed; no `//`, `.` or `..`; at most 512 bytes; no control characters); the same path twice is an error. Required (at least one) when `scan` includes `lockfiles`; ignored with a warning otherwise. |
+| `lockfile` | Repeatable, at most 200; only the first 50 are read in one run, the others are sent as `over_limit` (path only) so Smoke can show them. An absolute, clean path (a trailing `/` is removed; no `//`, `.` or `..`; at most 512 bytes; no control characters); the same path twice is an error. Required (at least one) when `scan` includes `lockfiles`; ignored with a warning otherwise. |
 
 `SMOKE_COLLECTOR_URL` and `SMOKE_COLLECTOR_TOKEN` override the file (there are no variables for
 `scan` or `lockfile`). The URL must be `https://`. `--insecure-http` allows `http://` only for
@@ -349,6 +349,7 @@ Each path gets a status:
 | `unreadable` | Permission denied (on the path, or on one of its lockfiles), or not a regular file or directory. |
 | `no_lockfile` | A directory without a supported name, or a file whose name is not supported. |
 | `too_large` | Over a size or file-count limit. |
+| `over_limit` | After the first 50 `lockfile` lines: not read, only the path is sent, so Smoke can list it on the host page. |
 
 `POST <url>/api/v1/collector/lockfiles` with the same headers as the OS report, except
 `Content-Type: application/vnd.smoke.lockfile-report+json` (Smoke checks the token before it

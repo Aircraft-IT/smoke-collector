@@ -300,3 +300,39 @@ func TestBodyAndDigest(t *testing.T) {
 		t.Error("Digest reordered its argument")
 	}
 }
+
+func TestOverLimitPathsAreReportedNotRead(t *testing.T) {
+	root := t.TempDir()
+	var paths []string
+	for i := range MaxPaths + 3 {
+		paths = append(paths, write(t, filepath.Join(root, fmt.Sprintf("app%02d", i), "yarn.lock"), "# yarn\n"))
+	}
+	var logs []string
+	r := &Reader{Logf: func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }}
+	rep := r.Read(paths)
+	if len(rep.Lockfiles) != MaxPaths+3 {
+		t.Fatalf("entries = %d", len(rep.Lockfiles))
+	}
+	for i, e := range rep.Lockfiles {
+		want := StatusOK
+		if i >= MaxPaths {
+			want = StatusOverLimit
+		}
+		if e.Status != want || e.Path != paths[i] {
+			t.Errorf("entry %d: %s %s", i, e.Path, e.Status)
+		}
+		if i >= MaxPaths && e.Files != nil {
+			t.Errorf("entry %d: files sent", i)
+		}
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "3 lockfile path(s) not read") {
+		t.Errorf("logs = %q", logs)
+	}
+	body, err := json.Marshal(rep.Lockfiles[MaxPaths])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"path":"` + paths[MaxPaths] + `","status":"over_limit"}`; string(body) != want {
+		t.Errorf("body = %s", body)
+	}
+}

@@ -5,7 +5,8 @@
 // read, never subdirectories and never any other file) or a file whose name is supported.
 // Symbolic links are followed. Files are opened read-only and non-blocking and must be regular
 // files. Limits: 20 MB per file and 50 MB for the whole report (counted as sent, JSON-encoded);
-// a path over a limit is reported as too_large without its files.
+// a path over a limit is reported as too_large without its files. Only the first 50 paths are
+// read; the others are reported as over_limit (path only), so Smoke can show them.
 package lockfiles
 
 import (
@@ -34,8 +35,11 @@ const ContentType = "application/vnd.smoke.lockfile-report+json"
 const ReportPath = "/api/v1/collector/lockfiles"
 
 const (
-	// MaxPaths is the number of lockfile= lines allowed.
-	MaxPaths = 20
+	// MaxPaths is the number of paths read in one run; the lockfile= lines after it are reported
+	// as over_limit without being read.
+	MaxPaths = 50
+	// MaxConfigPaths is the number of lockfile= lines allowed in the configuration.
+	MaxConfigPaths = 200
 	// MaxPathLen is the longest path Smoke accepts.
 	MaxPathLen = 512
 	// MaxFileBytes is the limit per file (FR-INV-01).
@@ -55,6 +59,8 @@ const (
 	StatusUnreadable Status = "unreadable"
 	StatusNoLockfile Status = "no_lockfile"
 	StatusTooLarge   Status = "too_large"
+	// StatusOverLimit: the path comes after the first MaxPaths and was not read.
+	StatusOverLimit Status = "over_limit"
 )
 
 // File is one lockfile. Size and SHA256 are those of Content (the bytes Smoke receives).
@@ -151,7 +157,18 @@ func (r *Reader) Read(paths []string) *Report {
 	}
 	rep := &Report{Lockfiles: []Entry{}}
 	total := int64(len(`{"lockfiles":[]}` + "\n"))
-	for _, p := range paths {
+	if len(paths) > MaxPaths && r.Logf != nil {
+		r.Logf("%d lockfile path(s) not read: only the first %d are read in one run (the others are reported as over_limit)",
+			len(paths)-MaxPaths, MaxPaths)
+	}
+	for i, p := range paths {
+		if i >= MaxPaths {
+			e := Entry{Path: p, Status: StatusOverLimit,
+				Reason: fmt.Sprintf("only the first %d lockfile paths are read", MaxPaths)}
+			total += encodedSize(e) + 1
+			rep.Lockfiles = append(rep.Lockfiles, e)
+			continue
+		}
 		e := r.readPath(p)
 		size := encodedSize(e)
 		if e.Status == StatusOK && total+size+1 > maxTotal {

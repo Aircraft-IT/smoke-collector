@@ -281,8 +281,8 @@ func (c *Config) loadFile(path string) error {
 
 // setLockfiles checks the lockfile= values (lines are their line numbers).
 func (c *Config) setLockfiles(file string, lines []int, paths []string) error {
-	if len(paths) > lockfiles.MaxPaths {
-		return errorf("%s line %d: at most %d lockfile lines", file, lines[lockfiles.MaxPaths], lockfiles.MaxPaths)
+	if len(paths) > lockfiles.MaxConfigPaths {
+		return errorf("%s line %d: at most %d lockfile lines", file, lines[lockfiles.MaxConfigPaths], lockfiles.MaxConfigPaths)
 	}
 	seen := map[string]int{}
 	for i, raw := range paths {

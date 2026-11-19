@@ -58,7 +58,7 @@ const usage = `Usage:
   smoke-collector version
 
 Configuration: %s (key=value: url, token or token_file,
-scan=os,lockfiles (default os), lockfile=/absolute/path (repeatable, at most 20)),
+scan=os,lockfiles (default os), lockfile=/absolute/path (repeatable, at most 200; the first 50 are read)),
 url and token overridden by %s and %s.
 
 Exit codes: 0 success, 1 configuration error, 2 collection failed,

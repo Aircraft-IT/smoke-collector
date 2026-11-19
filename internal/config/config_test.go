@@ -217,8 +217,8 @@ func TestScanAndLockfiles(t *testing.T) {
 		{name: "unclean", body: base + "lockfile=/srv/../etc\n", loadErr: "line 3: lockfile must be a clean path"},
 		{name: "empty path", body: base + "lockfile=\n", loadErr: "absolute"},
 		{name: "duplicate", body: base + "lockfile=/srv/a\nlockfile=/srv/a/\n", loadErr: "line 4: lockfile /srv/a is already on line 3"},
-		{name: "too many", body: base + manyLockfiles(21), loadErr: "line 23: at most 20 lockfile lines"},
-		{name: "twenty", body: base + "scan=lockfiles\n" + manyLockfiles(20), scans: "lockfiles", src: SourceFile, lockfiles: lockfilePaths(20)},
+		{name: "too many", body: base + manyLockfiles(201), loadErr: "line 203: at most 200 lockfile lines"},
+		{name: "two hundred", body: base + "scan=lockfiles\n" + manyLockfiles(200), scans: "lockfiles", src: SourceFile, lockfiles: lockfilePaths(200)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := write(t, dir, "c", tc.body, 0o640)
